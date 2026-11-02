@@ -50,6 +50,7 @@ struct Config {
     keep_alive_ms: i64 = 5000,      // how long an idle connection is kept
     keep_alive_max: i64 = 100,      // requests per connection before it is closed
     max_body: i64 = 1048576,        // larger requests get 413
+    backlog: i64 = 1024,            // connections the kernel holds until a worker accepts them
     tls_cert: const u8[:] = "",     // a PEM certificate chain: serve HTTPS instead of HTTP
     tls_key: const u8[:] = "",      // its PEM private key
     tls_lib: const u8[:] = "",      // libssl to load, if not found where OpenSSL 3 usually is
@@ -176,7 +177,7 @@ fn listen_or_abort(cfg: Config&) -> i64 {
         var why: u8[>..] = [];
         if !tls_setup(cfg.tls_cert, cfg.tls_key, cfg.tls_lib, why) { abort(str("honk: ", why)); }
     }
-    let fd = net_listen(cfg.host, cfg.port, 128);
+    let fd = net_listen(cfg.host, cfg.port, cfg.backlog);
     if fd < 0 { abort(str("honk: cannot listen on ", cfg.host, ":", cfg.port)); }
     return fd;
 }

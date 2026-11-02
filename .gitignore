@@ -1,6 +1,11 @@
 # Local roadmap, kept out of the repository
 PLAN.md
 
+# Build output: CI's build/, the benchmark servers and their latest results
+/build/
+bench/build/
+bench/results/
+
 # Executables from `goose build`, written beside their sources
 examples/hello
 examples/items

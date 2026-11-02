@@ -641,6 +641,7 @@ honk::serve(honk::Config {
     log: true,              // INFO:     "GET /items/1 HTTP/1.1" 200 OK (0.02 ms)
     timeout_ms: 10000,      // a client that sends nothing for this long is dropped
     max_body: 1048576,
+    backlog: 1024,          // connections the kernel holds until a worker accepts them
     keep_alive: true,       // serve several requests per connection
     keep_alive_ms: 5000,    // how long an idle connection is kept
     keep_alive_max: 100,    // requests per connection before it is closed

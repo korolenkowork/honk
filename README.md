@@ -1,5 +1,8 @@
 # Honk
 
+[![CI](https://github.com/korolenkowork/honk/actions/workflows/ci.yml/badge.svg)](https://github.com/korolenkowork/honk/actions/workflows/ci.yml)
+[![Benchmarks](https://github.com/korolenkowork/honk/actions/workflows/bench.yml/badge.svg)](https://github.com/korolenkowork/honk/actions/workflows/bench.yml)
+
 **Typed, self-documenting web servers for the [Goose](https://github.com/aardappel/goose) programming language.**
 
 Declare routes with typed models. Honk validates the request, fills your
@@ -90,6 +93,25 @@ function pointers, and no heap. Honk relies on the features it has instead:
 * **Sockets come in through `extern fn`**, about 100 lines of C in
   [`honk/src/honk_net.c`](honk/src/honk_net.c). The rest of Honk is Goose.
 
+## Performance
+
+The same JSON API in Honk, C, C++, C#, Java, Go, Python and JavaScript,
+each on its own standard library ([bench/](bench/README.md)). On an Apple M5
+with 10 connections:
+
+| Server | `GET /hello` | `POST /items` (JSON, validated) | Peak memory |
+|---|---:|---:|---:|
+| Honk (Goose) | 146,409 req/s | 133,777 req/s | 3.4 MiB |
+| C++ (hand-written) | 140,336 req/s | 142,231 req/s | 9.4 MiB |
+| C (hand-written) | 115,961 req/s | 116,334 req/s | 9.3 MiB |
+| JavaScript (Node) | 113,931 req/s | 109,199 req/s | 686.5 MiB |
+| Python | 68,342 req/s | 63,460 req/s | 234.8 MiB |
+
+With 256 connections, Honk keeps its throughput, but tail latency rises
+because each worker serves one connection at a time. [bench/README.md](bench/README.md)
+has every workload, the method, and the Linux numbers from CI for Go, Java
+and C#.
+
 ## Install
 
 You need the Goose compiler on `PATH`
@@ -128,6 +150,12 @@ examples/
   items.goose        CRUD: models, an enum, PATCH with Opt, errors, a router, a dependency, HTML
   threaded.goose     4 workers, a store thread owning the data, a background audit log
   https.goose        the same app over TLS
+bench/
+  run.py             builds each server, checks its answers, loads it with wrk
+  servers/           the same API in Honk, C, C++, C#, Java, Go, Python, JavaScript
+.github/workflows/
+  ci.yml             tests on Linux, macOS and Windows
+  bench.yml          the benchmarks, with tables in the run summary
 tests/
   test_honk.goose    46 checks through honk::request
   test_threads.goose the store, its timeout and background jobs (needs goose build)

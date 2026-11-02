@@ -62,6 +62,7 @@ struct Config {
     log: bool = true,                       // one line per request on stdout
     timeout_ms: i64 = 10000,                // receive timeout per connection
     max_body: i64 = 1048576,                // larger requests get 413
+    backlog: i64 = 1024,                    // the listen backlog
     keep_alive: bool = true,                // serve several requests per connection
     keep_alive_ms: i64 = 5000,              // how long an idle connection is kept
     keep_alive_max: i64 = 100,              // requests per connection before it is closed

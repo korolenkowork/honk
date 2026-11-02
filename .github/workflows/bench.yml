@@ -1,0 +1,53 @@
+# Benchmarks Honk against the same API in C, C++, C#, Java, Go, Python and
+# JavaScript (bench/README.md). The table goes to the run's summary, and the
+# raw numbers are kept as an artifact.
+name: Benchmarks
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Seconds per measured run
+        default: "10"
+  push:
+    branches: [main]
+    paths: [honk/**, bench/**, .github/workflows/bench.yml]
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Goose
+        run: .github/scripts/install-goose.sh
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.24"
+          cache: false
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: "8.0.x"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install wrk
+        run: sudo apt-get update -q && sudo apt-get install -y -q wrk
+
+      - name: Run the benchmarks
+        run: python3 bench/run.py --duration "${{ inputs.duration || '10' }}"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: bench-results
+          path: bench/results/
