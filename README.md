@@ -144,6 +144,8 @@ docs/
   errors, dependencies, routers, threads and shared state, OpenAPI, testing,
   deployment.
 * **[API reference](docs/reference.md)**: every public declaration.
+* **[Proposals to Goose](docs/proposals/README.md)**: three language changes
+  that would remove Honk's remaining workarounds.
 
 ## Running the examples and tests
 
