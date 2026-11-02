@@ -8,6 +8,7 @@ file with `import honk from "path/to/honk";`, and from your other files with
 <summary>Contents</summary>
 
 - [Serving](#serving): `serve`, `Config`, `request`
+- [Threads](#threads): `serve_threads`, `serve_on`, `ask`, `serve_store`, `background`, `run_jobs`
 - [Routes](#routes): `get`, `post`, `put`, `patch`, `delete`, `include`
 - [The request context](#the-request-context): `Ctx`, `Param`
 - [Request helpers](#request-helpers): `header`, `path_param`, `query_param`
@@ -90,6 +91,99 @@ let s, b = honk::request("POST", "/items", "{\"name\":\"Egg\"}", "x-token: abc\r
 
 The OpenAPI document is described for each call, so `/openapi.json` can be
 tested too.
+
+---
+
+## Threads
+
+Programs that use these must be built with `goose build`. The
+[guide](guide.md#14-threads-shared-state-and-background-jobs) explains the
+design.
+
+### `serve_threads`
+
+```goose
+fn serve_threads<W>(cfg: Config, workers: i64)
+```
+
+Listens on `cfg.host:cfg.port` and starts `workers` workers on the socket
+(`hardware_threads()` of them when `workers` is 0, and at most 255). `W` is
+the app's `thread_fn worker(fd: i64, id: i64)`, which calls `serve_on`.
+Then it waits on the workers, which run until the process ends. An abort in
+any worker ends the process.
+
+```goose
+let CONFIG = honk::Config { port: 8000, .. };
+thread_fn worker(fd: i64, id: i64) { honk::serve_on(fd, id, CONFIG, app); }
+fn main() { honk::serve_threads(CONFIG, 0, worker); }
+```
+
+### `serve_on`
+
+```goose
+fn serve_on<App>(fd: i64, id: i64, cfg: Config)
+```
+
+A worker's whole life: sets `worker_id` to `id`, then accepts connections
+on the listening socket `fd` and answers them with `App`, forever. `cfg`
+must be a `let` global, since a worker reads only flat or static globals.
+An idle keep-alive connection holds its worker for up to
+`cfg.keep_alive_ms`.
+
+### `ask`
+
+```goose
+fn ask<Req, Resp>(req: Req) -> Resp
+```
+
+Sends `req` to the store thread running `serve_store<Req>` and returns its
+reply. Both types must be flat. Name `Req` explicitly, or go through a
+wrapper that takes it, so that an enum variant is sent as its enum:
+
+```goose
+fn db(cmd: Cmd) -> Reply { honk::ask<Cmd, Reply>(cmd) }
+```
+
+Must be called under a route block. Answers 503 (`The store did not
+answer`) when no reply comes within `ask_timeout_ms`, and 500 if the reply
+is not a `Resp`.
+
+### `serve_store`
+
+```goose
+fn serve_store<Req, F>()
+```
+
+The store thread's loop: takes each `Req` sent with `ask` from any worker,
+in order, and replies with `F(req)`. The state is the store `thread_fn`'s
+locals, which the block reads and changes.
+
+### `background`
+
+```goose
+fn background<Job>(job: Job) -> bool
+```
+
+Queues a flat `job` for a worker running `run_jobs<Job>` and returns at
+once: `false` if the queue for `Job` is full (`qlimit<Job>(n)` sets a
+limit; there is none by default).
+
+### `run_jobs`
+
+```goose
+fn run_jobs<Job, F>()
+```
+
+A background worker's loop: runs `F(job)` for each queued `Job`, forever.
+
+### Globals
+
+```goose
+var worker_id: i64 = 0;          // this thread's worker id: 0 on main, 1.. on workers
+var ask_timeout_ms: i64 = 10000; // how long ask waits
+```
+
+Each thread has its own copy of every global, these included.
 
 ---
 

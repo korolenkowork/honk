@@ -22,10 +22,11 @@ The complete program behind most examples is
 - [11. Dependencies](#11-dependencies)
 - [12. Bigger applications: routers](#12-bigger-applications-routers)
 - [13. State and storage](#13-state-and-storage)
-- [14. OpenAPI and the docs pages](#14-openapi-and-the-docs-pages)
-- [15. Testing](#15-testing)
-- [16. Configuration and deployment](#16-configuration-and-deployment)
-- [17. How Honk works](#17-how-honk-works)
+- [14. Threads, shared state and background jobs](#14-threads-shared-state-and-background-jobs)
+- [15. OpenAPI and the docs pages](#15-openapi-and-the-docs-pages)
+- [16. Testing](#16-testing)
+- [17. Configuration and deployment](#17-configuration-and-deployment)
+- [18. How Honk works](#18-how-honk-works)
 
 </details>
 
@@ -453,8 +454,9 @@ writes just `import honk;`.
 
 ## 13. State and storage
 
-Handlers run one at a time on the main thread, so globals are a safe,
-simple store:
+With `honk::serve`, handlers run one at a time on the main thread, so
+globals are a safe, simple store. (With threads they are not; see
+[section 14](#14-threads-shared-state-and-background-jobs).)
 
 ```goose
 var items: Item[>..<] = [];     // grow-shrink: rows can be removed
@@ -479,7 +481,114 @@ format (`to_bytes` / `from_bytes`), so saving a table is one write.
 Per-request data lives in the Goose data stacks of that request, and is
 freed when the request ends with one store.
 
-## 14. OpenAPI and the docs pages
+## 14. Threads, shared state and background jobs
+
+`honk::serve` answers one request at a time. `honk::serve_threads` listens
+once and starts N workers that all accept connections on the same socket,
+so N requests run at once.
+
+Goose threads share no memory. Each worker is compiled as its own program
+with its own copy of every global, and values cross between threads only
+through typed queues. That shapes the API in three ways.
+
+**Each app declares its own worker.** A `thread_fn` cannot be generic, so
+Honk cannot write one that runs your app. Yours is one line:
+
+```goose
+let CONFIG = honk::Config { title: "Items API", .. };   // a let global: workers read it
+
+thread_fn worker(fd: i64, id: i64) { honk::serve_on(fd, id, CONFIG, app); }
+
+fn main() {
+    honk::serve_threads(CONFIG, 4, worker);     // 0 workers means hardware_threads()
+}
+```
+
+**Shared data lives in a store thread.** A global changed on one worker is
+not changed on the others, so the data that every request must see belongs
+to one store thread, as its locals. Handlers send it a command and wait for
+its reply:
+
+```goose
+enum Cmd { List, Get { id: i64 }, Create { item: ItemIn } }
+struct Reply { found: bool, item: Item, list: ItemList }
+
+thread_fn store() {
+    var items: Item[>..<] = [];
+    var next_id = 1;
+    honk::serve_store<Cmd>() { cmd =>
+        var r = Reply { .. };
+        match cmd {
+            Get g => { for x in items { if x.id == g.id { r.found = true; r.item = x; } } },
+            ...
+        }
+        r                                         // the reply
+    };
+}
+
+// The handlers' way to the store.
+fn db(cmd: Cmd) -> Reply { honk::ask<Cmd, Reply>(cmd) }
+
+honk::get<Item, ItemId>(c, "/items/{item_id}") { p =>
+    let r = db(Cmd.Get { id: p.item_id });
+    if !r.found { honk::raise(404, "Item not found"); }
+    r.item
+};
+
+fn main() {
+    thread_spawn(store);
+    honk::serve_threads(CONFIG, 4, worker);
+}
+```
+
+The store answers one command at a time, so its state needs no locks, and
+each command is atomic. Commands and replies cross between threads, so they
+must be **flat**: no references or slices, which means `u8[..N]` for text
+and limited arrays (`Item[..50]`) for lists.
+
+Write the `db` wrapper rather than calling `honk::ask` directly with an
+inferred type. `Cmd.Get { id: 1 }` on its own has the variant type
+`Cmd.Get`, and Goose keeps one queue per type, so `ask` would send it where
+the store never looks. A parameter of type `Cmd` makes every variant a
+`Cmd`.
+
+Each worker waits for its own reply, in a mailbox keyed by its worker id
+(`honk::worker_id`; 0 is the main thread). If the store does not reply
+within `honk::ask_timeout_ms` (10 seconds), the request is answered 503,
+and the late reply is discarded instead of answering the next question.
+The store also works with plain `honk::serve`, as long as the program is
+built.
+
+**Background jobs** are queued with `honk::background(job)`, which returns
+at once, and run by a worker of their own:
+
+```goose
+struct Audit { action: u8[..16], id: i64 }
+
+thread_fn auditor() {
+    honk::run_jobs<Audit>() { job => print("AUDIT: ", job.action, " item ", job.id); };
+}
+
+// in a handler:
+honk::background(Audit { action: "created", id: r.item.id });
+```
+
+Start several job workers for parallel jobs: each job goes to whichever
+one takes it first.
+
+**Builds and failures.** Programs with threads need `goose build`, because
+the in-process runner cannot start threads. An abort in any worker (a
+failed bounds check, say) ends the whole process, so run the server under
+a supervisor such as systemd or launchd that restarts it. With threads,
+an idle keep-alive connection holds its worker for up to
+`Config.keep_alive_ms`, so use at least as many workers as clients you
+expect to keep connections open.
+
+[`examples/threaded.goose`](../examples/threaded.goose) is the complete
+program. On a laptop it serves about 24,000 requests a second, each one a
+round trip to the store.
+
+## 15. OpenAPI and the docs pages
 
 At startup Honk describes the app into an OpenAPI 3.1 document:
 
@@ -498,7 +607,7 @@ The schema includes:
 
 Set `Config.docs = false` to serve none of the three.
 
-## 15. Testing
+## 16. Testing
 
 `honk::request` is the test client. It runs a request through the app in the
 same process, with no sockets, and returns the status and body:
@@ -519,7 +628,7 @@ lines, each ending in `\r\n`. The last two may be left out. See
 goose tests/test_honk.goose
 ```
 
-## 16. Configuration and deployment
+## 17. Configuration and deployment
 
 ```goose
 honk::serve(honk::Config {
@@ -545,21 +654,24 @@ it for TLS:
 goose build -O2 main.goose
 ```
 
-The server handles one request at a time. Connections are kept alive
-between requests (HTTP/1.1 by default, HTTP/1.0 when the client asks), but
-an idle connection gives way at once when another client connects, so a
-quiet client never holds the server. Pipelined requests are not supported:
-when a second request arrives before the first is answered, Honk answers
-the first and closes the connection, and the client sends the rest again.
-To use several cores, run one process per core on different ports behind
-the proxy's load balancer.
+`honk::serve` handles one request at a time, and `honk::serve_threads`
+handles one per worker ([section 14](#14-threads-shared-state-and-background-jobs)).
+Connections are kept alive between requests (HTTP/1.1 by default, HTTP/1.0
+when the client asks). With `serve`, an idle connection gives way at once
+when another client connects, so a quiet client never holds the server.
+Pipelined requests are not supported: when a second request arrives before
+the first is answered, Honk answers the first and closes the connection,
+and the client sends the rest again.
 
-## 17. How Honk works
+## 18. How Honk works
 
-The pieces fit in about 1,300 lines:
+The pieces fit in about 1,800 lines:
 
-* **`net.goose` and `src/honk_net.c`**: `listen`, `accept`, `recv`, `send`,
-  `close`, as `extern fn`s over BSD sockets.
+* **`net.goose`, `src/honk_net.c` and `src/honk_mail.c`**: `listen`,
+  `accept`, `recv`, `send`, `close` and `poll` over BSD sockets, and the
+  per-worker reply mailboxes, as `extern fn`s.
+* **`workers.goose`** starts the workers, and runs the store and job loops
+  on Goose's typed queues.
 * **`http.goose`** reads a request into one growable buffer. The method,
   path, query, headers and body are slices of it, and nothing is copied
   except percent-decoded text.

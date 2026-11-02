@@ -64,6 +64,9 @@ Then open **http://127.0.0.1:8000/docs**.
 | Docs | `/docs` (Swagger UI), `/redoc` and `/openapi.json`, generated at startup |
 | Testing | `honk::request("GET", "/items/1", app)`, in-process with no sockets |
 | Keep-alive | Connections are reused between requests |
+| Threads | `honk::serve_threads`: N workers accepting on one socket |
+| Shared state | A store thread that owns the data, reached with `honk::ask` |
+| Background jobs | `honk::background(job)`, run by a worker with `honk::run_jobs` |
 | Status codes | `honk::post<R, P>(c, path, "summary", 201)` |
 | Other responses | `honk::Html`, `honk::Text`, `honk::Redirect`, `honk::NoContent` |
 
@@ -114,13 +117,17 @@ honk/                the package
   model.goose        JSON writer, body validation, JSON Schema, by reflection
   openapi.goose      /openapi.json, /docs (Swagger UI), /redoc
   http.goose         request parsing, percent-decoding, responses
-  net.goose          extern fn bindings to the socket layer
+  workers.goose      serve_threads, the store (ask, serve_store), background jobs
+  net.goose          extern fn bindings to the C layer
   src/honk_net.c     BSD sockets (Winsock on Windows)
+  src/honk_mail.c    per-worker reply mailboxes for honk::ask
 examples/
   hello.goose        two routes
   items.goose        CRUD: models, an enum, PATCH with Opt, errors, a router, a dependency, HTML
+  threaded.goose     4 workers, a store thread owning the data, a background audit log
 tests/
   test_honk.goose    46 checks through honk::request
+  test_threads.goose the store, its timeout and background jobs (needs goose build)
 docs/
   quickstart.md      from nothing to /docs in five minutes
   guide.md           every feature, by example
@@ -131,7 +138,8 @@ docs/
 
 * **[Quickstart](docs/quickstart.md)**: install, first app, try it.
 * **[Guide](docs/guide.md)**: routes, params, models, validation, responses,
-  errors, dependencies, routers, OpenAPI, testing, deployment.
+  errors, dependencies, routers, threads and shared state, OpenAPI, testing,
+  deployment.
 * **[API reference](docs/reference.md)**: every public declaration.
 
 ## Running the examples and tests
@@ -148,15 +156,27 @@ goose examples/items.goose
 goose tests/test_honk.goose
 ```
 
+Programs with threads must be built first:
+
+```bash
+goose build examples/threaded.goose && examples/threaded
+```
+
+```bash
+goose build tests/test_threads.goose && tests/test_threads
+```
+
 ## Status and limits
 
 Honk is version 0.1 and these are its limits:
 
-* **One request at a time.** The server is a single-threaded loop. It keeps
-  connections alive, but an idle one gives way as soon as another client
-  connects. Goose threads share no memory and cannot be generic, so a
-  worker pool is future work. Run several processes behind a reverse proxy
-  to use more cores.
+* **Threads need `goose build`.** `honk::serve_threads` runs N workers, but
+  the in-process runner (`goose app.goose`) cannot start threads, and there
+  `honk::serve` answers one request at a time.
+* **Workers share no state.** Each worker has its own copy of the globals,
+  so shared data lives in a store thread that handlers reach with
+  `honk::ask`, or in an external database. An abort in any worker ends the
+  process; run it under a supervisor that restarts it.
 * **HTTP/1.1 only, without TLS.** Terminate TLS in a proxy such as nginx or
   Caddy.
 * **What a model field may be** is listed in [the guide](docs/guide.md#6-models).
@@ -167,7 +187,8 @@ Honk is version 0.1 and these are its limits:
   because Goose reflection cannot see whether a field declares a default.
   Use `honk::Opt<T>` for an optional field whose default is zero (see
   [the guide](docs/guide.md#required-and-optional-fields)).
-* **No async.** Handlers run to completion, which Goose makes fast.
+* **No async.** Handlers run to completion on their worker. Slow work goes
+  to a background worker with `honk::background`.
 
 ## References
 

@@ -117,19 +117,20 @@ void honk_net_close(int64_t fd) { honk_closesock((int)fd); }
 /* Waits up to timeout_ms for the next request on an idle keep-alive
    connection, watching the listening socket too. Returns 1 when the
    connection has data (or was closed), 2 when a new client is waiting on
-   the listener first, and 0 on a timeout. */
+   the listener first, and 0 on a timeout. A negative listener watches the
+   connection alone. */
 int64_t honk_net_wait(int64_t conn, int64_t listener, int64_t timeout_ms) {
 #ifdef _WIN32
     WSAPOLLFD p[2];
     p[0].fd = (SOCKET)conn; p[0].events = POLLRDNORM; p[0].revents = 0;
     p[1].fd = (SOCKET)listener; p[1].events = POLLRDNORM; p[1].revents = 0;
-    int n = WSAPoll(p, 2, (INT)timeout_ms);
+    int n = WSAPoll(p, listener < 0 ? 1 : 2, (INT)timeout_ms);
 #else
     struct pollfd p[2];
     p[0].fd = (int)conn; p[0].events = POLLIN; p[0].revents = 0;
     p[1].fd = (int)listener; p[1].events = POLLIN; p[1].revents = 0;
     int n;
-    do { n = poll(p, 2, (int)timeout_ms); } while (n < 0 && errno == EINTR);
+    do { n = poll(p, listener < 0 ? 1 : 2, (int)timeout_ms); } while (n < 0 && errno == EINTR);
 #endif
     if (n <= 0) return 0;
     if (p[0].revents) return 1;

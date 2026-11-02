@@ -4,7 +4,9 @@ PLAN.md
 # Executables from `goose build`, written beside their sources
 examples/hello
 examples/items
+examples/threaded
 tests/test_honk
+tests/test_threads
 *.exe
 *.pdb
 *.ilk

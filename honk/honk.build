@@ -1,3 +1,4 @@
-// The native part of Honk: BSD sockets, in src/honk_net.c.
-c_sources = ["src/honk_net.c"];
+// The native part of Honk: BSD sockets (src/honk_net.c) and the reply
+// mailboxes behind honk::ask (src/honk_mail.c).
+c_sources = ["src/honk_net.c", "src/honk_mail.c"];
 c_libs_windows = ["ws2_32"];

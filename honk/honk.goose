@@ -18,9 +18,10 @@
 //
 //     fn main() { honk::serve(honk::Config { port: 8000, .. }, app); }
 //
-// The modules: net (sockets, the only C), http (requests and responses),
-// model (JSON out, validation in, schemas), routing (route declarations)
-// and openapi (the schema and the docs pages).
+// The modules: net (sockets and mailboxes, the only C), http (requests and
+// responses), model (JSON out, validation in, schemas), routing (route
+// declarations), openapi (the schema and the docs pages) and workers
+// (threads, shared state and background jobs).
 namespace honk;
 
 import std;
@@ -31,6 +32,7 @@ import .http;
 import .model;
 import .routing;
 import .openapi;
+import .workers;
 
 let VERSION = "0.1.0";
 
@@ -155,12 +157,24 @@ fn include<F>(c: Ctx&, prefix: const u8[:], tag: const u8[:] = "") {
 // Listens on cfg.host:cfg.port and answers requests with App until the
 // process ends. App is `fn app(c: honk::Ctx&)`, declaring the routes.
 fn serve<App>(cfg: Config) {
-    var spec: u8[>..] = [];
-    if cfg.docs { build_openapi(cfg, spec, App); }
-    let fd = net_listen(cfg.host, cfg.port, 128);
-    if fd < 0 { abort(str("honk: cannot listen on ", cfg.host, ":", cfg.port)); }
+    let fd = listen_or_abort(cfg);
     print("INFO:     Honk ", VERSION, " running on http://", cfg.host, ":", cfg.port,
           if cfg.docs { " (docs at /docs)" } else { "" });
+    accept_loop(cfg, fd, true, App);
+}
+
+fn listen_or_abort(cfg: Config&) -> i64 {
+    let fd = net_listen(cfg.host, cfg.port, 128);
+    if fd < 0 { abort(str("honk: cannot listen on ", cfg.host, ":", cfg.port)); }
+    return fd;
+}
+
+// Accepts connections on the listening socket fd and answers their requests
+// with App, forever. give_way closes an idle keep-alive connection as soon
+// as another client connects, for a server that answers one at a time.
+fn accept_loop<App>(cfg: Config&, fd: i64, give_way: bool) {
+    var spec: u8[>..] = [];
+    if cfg.docs { build_openapi(cfg, spec, App); }
     loop {
         let conn = net_accept(fd, cfg.timeout_ms);
         if conn < 0 { continue; }
@@ -183,9 +197,7 @@ fn serve<App>(cfg: Config) {
             }
             served++;
             if !keep || served >= cfg.keep_alive_max { break; }
-            // One request at a time: an idle connection gives way as soon as
-            // another client is waiting, rather than holding the server.
-            if net_wait(conn, fd, cfg.keep_alive_ms) != 1 { break; }
+            if net_wait(conn, if give_way { fd } else { -1 }, cfg.keep_alive_ms) != 1 { break; }
         }
         net_close(conn);
     }
