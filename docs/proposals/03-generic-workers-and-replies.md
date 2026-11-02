@@ -1,7 +1,7 @@
 # Proposal: generic `thread_fn`, and replies to one worker
 
-*A proposal to the Goose language, from the Honk web framework. Draft, not
-yet filed.*
+*A proposal to the Goose language, from the Honk web framework. Filed as
+[aardappel/goose#202](https://github.com/aardappel/goose/issues/202).*
 
 ## Summary
 

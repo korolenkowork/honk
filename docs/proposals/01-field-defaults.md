@@ -1,7 +1,7 @@
 # Proposal: whether a field has a default, in `const for ... in fields<T>`
 
-*A proposal to the Goose language, from the Honk web framework. Draft, not
-yet filed.*
+*A proposal to the Goose language, from the Honk web framework. Filed as
+[aardappel/goose#200](https://github.com/aardappel/goose/issues/200).*
 
 ## Summary
 

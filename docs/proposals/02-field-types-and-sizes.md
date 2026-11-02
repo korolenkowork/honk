@@ -1,7 +1,7 @@
 # Proposal: a field's type in `fields<T>`, and size parameters
 
-*A proposal to the Goose language, from the Honk web framework. Draft, not
-yet filed.*
+*A proposal to the Goose language, from the Honk web framework. Filed as
+[aardappel/goose#201](https://github.com/aardappel/goose/issues/201).*
 
 ## Summary
 
