@@ -44,7 +44,7 @@ struct Call<Req> { from: i64, seq: i64, req: Req }
 fn serve_threads<W>(cfg: Config, workers: i64) {
     let n = min(if workers > 0 { workers } else { max(1, hardware_threads()) }, mail_slots() - 1);
     let fd = listen_or_abort(cfg);
-    print("INFO:     Honk ", VERSION, " running on http://", cfg.host, ":", cfg.port, " with ", n,
+    print("INFO:     Honk ", VERSION, " running on ", scheme(cfg), "://", cfg.host, ":", cfg.port, " with ", n,
           " workers", if cfg.docs { " (docs at /docs)" } else { "" });
     var ids: i64[>..] = [];
     for i in n { ids.push(thread_spawn(W, fd, i + 1)); }

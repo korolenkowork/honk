@@ -65,11 +65,19 @@ struct Config {
     keep_alive: bool = true,                // serve several requests per connection
     keep_alive_ms: i64 = 5000,              // how long an idle connection is kept
     keep_alive_max: i64 = 100,              // requests per connection before it is closed
+    tls_cert: const u8[:] = "",             // PEM certificate chain: serve HTTPS
+    tls_key: const u8[:] = "",              // its PEM private key
+    tls_lib: const u8[:] = "",              // libssl to load instead of the usual places
 }
 ```
 
 `host` is an IPv4 address, `"0.0.0.0"` for every interface, or
 `"localhost"`.
+
+With `tls_cert` and `tls_key` set, `serve` and `serve_threads` load OpenSSL
+3 at startup and speak TLS 1.2 or 1.3 on every connection. They abort with
+the reason if OpenSSL cannot be loaded or the files cannot be used. See the
+[guide](guide.md#https).
 
 ### `request`
 

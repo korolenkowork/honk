@@ -1,4 +1,7 @@
-// The native part of Honk: BSD sockets (src/honk_net.c) and the reply
-// mailboxes behind honk::ask (src/honk_mail.c).
-c_sources = ["src/honk_net.c", "src/honk_mail.c"];
+// The native part of Honk: BSD sockets (src/honk_net.c), TLS on OpenSSL
+// loaded at run time (src/honk_tls.c) and the reply mailboxes behind
+// honk::ask (src/honk_mail.c). Nothing here links OpenSSL.
+c_sources = ["src/honk_net.c", "src/honk_tls.c", "src/honk_mail.c"];
+c_include = ["src"];
+c_libs_linux = ["dl"];
 c_libs_windows = ["ws2_32"];

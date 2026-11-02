@@ -1,8 +1,10 @@
 /* The native part of Honk: a thin layer over BSD sockets.
    Goose has no networking in its standard library, so Honk brings these
    few functions in through `extern fn` (see net.goose). Everything else,
-   HTTP included, is Goose. */
+   HTTP included, is Goose. When a certificate is loaded (honk_tls.c), the
+   same functions speak TLS on every connection they accept. */
 #include "goose.h"
+#include "honk_tls.h"
 
 #include <errno.h>
 #include <stdbool.h>
@@ -83,6 +85,7 @@ int64_t honk_net_accept(int64_t fd, int64_t timeout_ms) {
         setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof tv);
         int one = 1;
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof one);
+        if (honk_tls_on() && !honk_tls_accept(c)) { honk_closesock(c); continue; }
         return c;
     }
 }
@@ -93,8 +96,9 @@ int64_t honk_net_recv(int64_t fd, gs_rref out, int64_t max) {
     char buf[16384];
     if (max > (int64_t)sizeof buf) max = (int64_t)sizeof buf;
     for (;;) {
-        long n = (long)recv((int)fd, buf, (size_t)max, 0);
-        if (n < 0 && errno == EINTR) continue;
+        long n = honk_tls_on() ? honk_tls_recv((int)fd, buf, (long)max)
+                               : (long)recv((int)fd, buf, (size_t)max, 0);
+        if (n < 0 && errno == EINTR && !honk_tls_on()) continue;
         if (n > 0) gs_bld_append(out, buf, (int64_t)n);
         return n < 0 ? -1 : (int64_t)n;
     }
@@ -104,15 +108,19 @@ int64_t honk_net_recv(int64_t fd, gs_rref out, int64_t max) {
 bool honk_net_send(int64_t fd, honk_bytes data) {
     int64_t done = 0;
     while (done < data.len) {
-        long n = (long)send((int)fd, (const char *)data.data + done, (size_t)(data.len - done), 0);
-        if (n < 0 && errno == EINTR) continue;
+        long n = honk_tls_on() ? honk_tls_send((int)fd, (const char *)data.data + done, (long)(data.len - done))
+                               : (long)send((int)fd, (const char *)data.data + done, (size_t)(data.len - done), 0);
+        if (n < 0 && errno == EINTR && !honk_tls_on()) continue;
         if (n <= 0) return false;
         done += n;
     }
     return true;
 }
 
-void honk_net_close(int64_t fd) { honk_closesock((int)fd); }
+void honk_net_close(int64_t fd) {
+    if (honk_tls_on()) honk_tls_close((int)fd);
+    honk_closesock((int)fd);
+}
 
 /* Waits up to timeout_ms for the next request on an idle keep-alive
    connection, watching the listening socket too. Returns 1 when the
@@ -120,6 +128,7 @@ void honk_net_close(int64_t fd) { honk_closesock((int)fd); }
    the listener first, and 0 on a timeout. A negative listener watches the
    connection alone. */
 int64_t honk_net_wait(int64_t conn, int64_t listener, int64_t timeout_ms) {
+    if (honk_tls_on() && honk_tls_pending((int)conn)) return 1;   /* already decrypted */
 #ifdef _WIN32
     WSAPOLLFD p[2];
     p[0].fd = (SOCKET)conn; p[0].events = POLLRDNORM; p[0].revents = 0;

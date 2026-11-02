@@ -67,6 +67,7 @@ Then open **http://127.0.0.1:8000/docs**.
 | Threads | `honk::serve_threads`: N workers accepting on one socket |
 | Shared state | A store thread that owns the data, reached with `honk::ask` |
 | Background jobs | `honk::background(job)`, run by a worker with `honk::run_jobs` |
+| HTTPS | `Config { tls_cert: "cert.pem", tls_key: "key.pem", .. }`, on OpenSSL 3 loaded at run time |
 | Status codes | `honk::post<R, P>(c, path, "summary", 201)` |
 | Other responses | `honk::Html`, `honk::Text`, `honk::Redirect`, `honk::NoContent` |
 
@@ -120,11 +121,13 @@ honk/                the package
   workers.goose      serve_threads, the store (ask, serve_store), background jobs
   net.goose          extern fn bindings to the C layer
   src/honk_net.c     BSD sockets (Winsock on Windows)
+  src/honk_tls.c     TLS, on OpenSSL 3 loaded with dlopen when a certificate is set
   src/honk_mail.c    per-worker reply mailboxes for honk::ask
 examples/
   hello.goose        two routes
   items.goose        CRUD: models, an enum, PATCH with Opt, errors, a router, a dependency, HTML
   threaded.goose     4 workers, a store thread owning the data, a background audit log
+  https.goose        the same app over TLS
 tests/
   test_honk.goose    46 checks through honk::request
   test_threads.goose the store, its timeout and background jobs (needs goose build)
@@ -177,8 +180,9 @@ Honk is version 0.1 and these are its limits:
   so shared data lives in a store thread that handlers reach with
   `honk::ask`, or in an external database. An abort in any worker ends the
   process; run it under a supervisor that restarts it.
-* **HTTP/1.1 only, without TLS.** Terminate TLS in a proxy such as nginx or
-  Caddy.
+* **HTTP/1.1 only.** HTTPS works natively when OpenSSL 3 is installed, but
+  there is no HTTP/2. Put a proxy such as nginx or Caddy in front for
+  HTTP/2, or to manage certificates for you.
 * **What a model field may be** is listed in [the guide](docs/guide.md#6-models).
   Request models take scalars, strings (`const u8[:]`, or `u8[..N]` for N
   from 8 to 4096 in powers of two), `honk::Opt<T>`, `honk::Enum<E>`, one
@@ -200,6 +204,8 @@ Honk is version 0.1 and these are its limits:
 * [OpenAPI 3.1 specification](https://spec.openapis.org/oas/v3.1.0),
   [Swagger UI](https://swagger.io/tools/swagger-ui/),
   [ReDoc](https://github.com/Redocly/redoc)
+* [OpenSSL 3](https://www.openssl.org/docs/man3.0/man7/ssl.html), the TLS
+  library Honk loads for HTTPS
 * [RFC 9110, HTTP semantics](https://www.rfc-editor.org/rfc/rfc9110) and
   [RFC 9112, HTTP/1.1](https://www.rfc-editor.org/rfc/rfc9112)
 

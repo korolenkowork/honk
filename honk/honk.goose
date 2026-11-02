@@ -50,6 +50,9 @@ struct Config {
     keep_alive_ms: i64 = 5000,      // how long an idle connection is kept
     keep_alive_max: i64 = 100,      // requests per connection before it is closed
     max_body: i64 = 1048576,        // larger requests get 413
+    tls_cert: const u8[:] = "",     // a PEM certificate chain: serve HTTPS instead of HTTP
+    tls_key: const u8[:] = "",      // its PEM private key
+    tls_lib: const u8[:] = "",      // libssl to load, if not found where OpenSSL 3 usually is
 }
 
 // A path parameter captured by the matched route.
@@ -158,16 +161,27 @@ fn include<F>(c: Ctx&, prefix: const u8[:], tag: const u8[:] = "") {
 // process ends. App is `fn app(c: honk::Ctx&)`, declaring the routes.
 fn serve<App>(cfg: Config) {
     let fd = listen_or_abort(cfg);
-    print("INFO:     Honk ", VERSION, " running on http://", cfg.host, ":", cfg.port,
+    print("INFO:     Honk ", VERSION, " running on ", scheme(cfg), "://", cfg.host, ":", cfg.port,
           if cfg.docs { " (docs at /docs)" } else { "" });
     accept_loop(cfg, fd, true, App);
 }
 
+// Opens the listening socket, and loads the certificate when cfg asks for
+// TLS, so that every connection accepted after this speaks HTTPS.
 fn listen_or_abort(cfg: Config&) -> i64 {
+    if cfg.tls_cert.len > 0 || cfg.tls_key.len > 0 {
+        if cfg.tls_cert.len == 0 || cfg.tls_key.len == 0 {
+            abort("honk: TLS needs both Config.tls_cert and Config.tls_key");
+        }
+        var why: u8[>..] = [];
+        if !tls_setup(cfg.tls_cert, cfg.tls_key, cfg.tls_lib, why) { abort(str("honk: ", why)); }
+    }
     let fd = net_listen(cfg.host, cfg.port, 128);
     if fd < 0 { abort(str("honk: cannot listen on ", cfg.host, ":", cfg.port)); }
     return fd;
 }
+
+fn scheme(cfg: Config&) -> const u8[:] { if cfg.tls_cert.len > 0 { "https" } else { "http" } }
 
 // Accepts connections on the listening socket fd and answers their requests
 // with App, forever. give_way closes an idle keep-alive connection as soon

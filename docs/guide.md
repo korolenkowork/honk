@@ -644,15 +644,53 @@ honk::serve(honk::Config {
     keep_alive: true,       // serve several requests per connection
     keep_alive_ms: 5000,    // how long an idle connection is kept
     keep_alive_max: 100,    // requests per connection before it is closed
+    tls_cert: "",           // set both to serve HTTPS (see below)
+    tls_key: "",
 }, app);
 ```
 
-For production, build a native binary and put a reverse proxy in front of
-it for TLS:
+For production, build a native binary:
 
 ```bash
 goose build -O2 main.goose
 ```
+
+### HTTPS
+
+Give `Config` a PEM certificate chain and its private key, and every
+connection speaks TLS 1.2 or 1.3:
+
+```goose
+honk::serve(honk::Config { port: 8443, tls_cert: "cert.pem", tls_key: "key.pem", .. }, app);
+```
+
+Honk does not link a TLS library. When a certificate is set, it loads
+OpenSSL 3's `libssl` at startup (with `dlopen`, or `LoadLibrary` on
+Windows), so an app that serves plain HTTP builds and runs with no TLS
+library installed. Honk looks where OpenSSL usually is: the system library
+path, then Homebrew and MacPorts on macOS (`brew install openssl@3`), and
+`libssl.so.3` on Linux (the `libssl3` package). `Config.tls_lib` names the
+file to load instead. A certificate that cannot be read, a key that does
+not match it, or a missing OpenSSL stops the server at startup with the
+reason:
+
+```
+honk: cannot read the private key: error:05800074:x509 certificate routines::key values mismatch
+```
+
+TLS works the same with `serve_threads`, and keep-alive carries over. A
+client that speaks plain HTTP to the TLS port is dropped during the
+handshake, and the server goes on. For local testing, make a certificate
+for localhost:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=localhost \
+    -addext subjectAltName=DNS:localhost,IP:127.0.0.1 -keyout key.pem -out cert.pem
+```
+
+[`examples/https.goose`](../examples/https.goose) is a complete program.
+Honk serves HTTP/1.1 only. For HTTP/2, or for certificates that renew
+themselves, put a proxy such as Caddy or nginx in front.
 
 `honk::serve` handles one request at a time, and `honk::serve_threads`
 handles one per worker ([section 14](#14-threads-shared-state-and-background-jobs)).
@@ -665,10 +703,10 @@ and the client sends the rest again.
 
 ## 18. How Honk works
 
-The pieces fit in about 1,800 lines:
+The pieces fit in about 2,000 lines:
 
-* **`net.goose`, `src/honk_net.c` and `src/honk_mail.c`**: `listen`,
-  `accept`, `recv`, `send`, `close` and `poll` over BSD sockets, and the
+* **`net.goose` and `src/`**: `listen`, `accept`, `recv`, `send`, `close`
+  and `poll` over BSD sockets, TLS on OpenSSL loaded at run time, and the
   per-worker reply mailboxes, as `extern fn`s.
 * **`workers.goose`** starts the workers, and runs the store and job loops
   on Goose's typed queues.

@@ -5,6 +5,8 @@ PLAN.md
 examples/hello
 examples/items
 examples/threaded
+examples/https
+*.pem
 tests/test_honk
 tests/test_threads
 *.exe
