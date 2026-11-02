@@ -14,6 +14,7 @@ file with `import honk from "path/to/honk";`, and from your other files with
 - [Responses](#responses): `Html`, `Text`, `Redirect`, `NoContent`, `set_header`
 - [Errors](#errors): `raise`, `HTTPError`
 - [Models](#models): `to_json`, `schema_of`
+- [Optional values and enums](#optional-values-and-enums): `Opt`, `opt`, `Enum`, `enum_name`
 - [Types for params](#types-for-params): `NoParams`
 - [Constants](#constants)
 
@@ -38,7 +39,12 @@ honk::serve(honk::Config { port: 8000, .. }, app);
 ```
 
 Aborts with a message if it cannot listen. Requests are answered one at a
-time, each with `Connection: close`. A request whose head exceeds 64 KiB,
+time. A connection is kept open for the next request when the client
+allows it (HTTP/1.1 unless `Connection: close`, HTTP/1.0 only with
+`Connection: keep-alive`), until it has served `keep_alive_max` requests or
+idled for `keep_alive_ms`. An idle connection is closed at once when another
+client connects, and a connection with pipelined requests is closed after
+its first answer. A request whose head exceeds 64 KiB,
 or that is malformed, gets 400, and one whose body exceeds `cfg.max_body`
 gets 413.
 
@@ -55,6 +61,9 @@ struct Config {
     log: bool = true,                       // one line per request on stdout
     timeout_ms: i64 = 10000,                // receive timeout per connection
     max_body: i64 = 1048576,                // larger requests get 413
+    keep_alive: bool = true,                // serve several requests per connection
+    keep_alive_ms: i64 = 5000,              // how long an idle connection is kept
+    keep_alive_max: i64 = 100,              // requests per connection before it is closed
 }
 ```
 
@@ -120,8 +129,10 @@ declared default. Then each field is filled by name and type:
 
 Scalar and string fields are parsed by type: `i64`, `i32`, `f64`, `bool`
 (`true/false/1/0/yes/no/on/off`; present with no value means true),
-`const u8[:]`, and `u8[..N]` for N in 8, 16, 32, 64, 128 and 256. Every
-failure is collected, and if there are any, the request is answered with
+`const u8[:]`, `u8[>..]`, `u8[..N]` for N from 8 to 4096 in powers of two,
+and `Enum<E>`. A `T[>..]` field takes every query parameter of its name
+(`?tag=a&tag=b`), and an `Opt<T>` field is filled and set only when its
+parameter, or for a model its body, was sent. Every failure is collected, and if there are any, the request is answered with
 422 and the block does not run. The error format is described under
 [Errors](#errors).
 
@@ -167,6 +178,7 @@ struct Ctx {
     handled: bool = false,
     path_seen: bool = false,
     describing: bool = false,       // true during the startup describe pass
+    keep_alive: bool = false,       // the connection stays open after this response
     prefix: u8[..128] = [],
     tag: const u8[:] = "",
     api: Api&,
@@ -274,7 +286,8 @@ fn set_header(c: Ctx&, name: const u8[:], value: const u8[:])
 ```
 
 Adds a header line to the response. Every response also carries
-`content-type`, `content-length`, `server: honk` and `connection: close`.
+`content-type`, `content-length`, `server: honk` and `connection`
+(`keep-alive` or `close`).
 
 ---
 
@@ -318,7 +331,8 @@ its error list. Throwing one yourself with `exception::throw(HTTPError {
 
 Types: `missing`, `int_type`, `int_parsing`, `int_from_float`,
 `int_too_big`, `float_type`, `float_parsing`, `bool_type`, `bool_parsing`,
-`string_type`, `string_too_long`, `model_attributes_type`, `json_invalid`.
+`string_type`, `string_too_long`, `enum`, `list_type`,
+`model_attributes_type`, `json_invalid`.
 
 ### Built-in statuses
 
@@ -337,8 +351,8 @@ Types: `missing`, `int_type`, `int_parsing`, `int_from_float`,
 A model is any struct. Its fields may be the types listed in the
 [guide](guide.md#6-models), and Honk reads them by reflection. A field is
 **required** in a request body when its value in `T { .. }` is its type's
-zero (`0`, `0.0`, empty). `bool` fields are never required, and nested
-models always are.
+zero (`0`, `0.0`, empty). `bool`, `Opt` and list fields are never required;
+`Enum` fields and nested models always are.
 
 ### `to_json`
 
@@ -362,6 +376,36 @@ Appends the JSON Schema of `v`'s type, as `/openapi.json` uses it:
 
 ---
 
+## Optional values and enums
+
+### `Opt`
+
+```goose
+struct Opt<T> { set: bool = false, value: T }
+fn opt<T>(v: T) -> Opt<T>                   // set, holding v
+```
+
+A field that may be absent or `null`. In a request it is never required,
+and `set` says whether a value arrived: from a parameter of its name, from
+the body when `T` is a model, or from the JSON member. An explicit `null`
+unsets it. A default value is written `= honk::opt(v)`. In a response an
+unset `Opt` is `null`. Its schema is `anyOf` T's schema and `null`.
+
+### `Enum`
+
+```goose
+struct Enum<E> { value: E }
+fn enum_name<E>(v: E) -> const u8[:]        // the variant's name
+fn enum_parse<E>(s: u8[:], dst: E&) -> bool // the variant named s, if any
+```
+
+A field holding a variant of `E`, whose variants must have no payloads.
+It is read and written as the variant's name, and described as a string
+schema with `enum` listing the names. An unknown name is a 422 of type
+`enum`. In a request body an `Enum` field is required.
+
+---
+
 ## Types for params
 
 ### `NoParams`
@@ -372,6 +416,10 @@ struct NoParams { }
 
 The params type of the one-type route form. The two-type form never needs
 it.
+
+The block receives `P` by reference, since a `P` holding a list is not
+fixed-size and Goose copies such values only when asked. `p.field` reads
+the same either way.
 
 ---
 

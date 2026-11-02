@@ -1,6 +1,7 @@
 // A CRUD API: request and response
-// models, validation, path/query/body params, HTTP errors, a router with a
-// prefix, a dependency and an HTML page. The items live in a global array.
+// models, validation, path/query/body params, an enum, partial updates with
+// honk::Opt, HTTP errors, a router with a prefix, a dependency and an HTML
+// page. The items live in a global array.
 //
 //     goose examples/items.goose
 //     open http://127.0.0.1:8000/docs
@@ -11,6 +12,9 @@ import std;
 
 struct Dimensions { width: f64, height: f64 }
 
+// Sent and answered as "Tool", "Toy" or "Food".
+enum Category { Tool, Toy, Food }
+
 // What a client sends to create an item. tax and in_stock have defaults,
 // so they may be left out; the rest are required.
 struct ItemIn {
@@ -19,8 +23,12 @@ struct ItemIn {
     price: f64,
     tax: f64 = 0.2,
     in_stock: bool = true,
+    category: honk::Enum<Category>,
     size: Dimensions,
 }
+
+// A partial update: only the fields the client sends change.
+struct ItemPatch { name: honk::Opt<u8[..32]>, price: honk::Opt<f64>, in_stock: honk::Opt<bool> }
 
 // What the API answers with.
 struct Item {
@@ -30,6 +38,7 @@ struct Item {
     price: f64,
     price_with_tax: f64,
     in_stock: bool,
+    category: honk::Enum<Category>,
     size: Dimensions,
 }
 
@@ -42,6 +51,7 @@ struct ListItems { skip: i64 = 0, limit: i64 = 10, q: const u8[:] = "" }
 struct ItemId { item_id: i64 }
 struct CreateItem { item: ItemIn }
 struct UpdateItem { item_id: i64, item: ItemIn }
+struct PatchItem { item_id: i64, patch: ItemPatch }
 
 struct User { username: const u8[:], admin: bool }
 
@@ -52,7 +62,8 @@ var next_id = 1;
 
 fn store(id: i64, it: ItemIn&) -> Item {
     Item { id: id, name: it.name, description: it.description, price: it.price,
-           price_with_tax: it.price * (1.0 + it.tax), in_stock: it.in_stock, size: it.size }
+           price_with_tax: it.price * (1.0 + it.tax), in_stock: it.in_stock, category: it.category,
+           size: it.size }
 }
 
 fn find_item(id: i64) -> i64 {
@@ -99,6 +110,17 @@ fn item_routes(c: honk::Ctx&) {
         items[i]
     };
 
+    honk::patch<Item, PatchItem>(c, "/{item_id}", "Update some fields of an item") { p =>
+        let i = find_item(p.item_id);
+        if p.patch.name.set { items[i].name = p.patch.name.value; }
+        if p.patch.price.set {
+            items[i].price_with_tax = items[i].price_with_tax / items[i].price * p.patch.price.value;
+            items[i].price = p.patch.price.value;
+        }
+        if p.patch.in_stock.set { items[i].in_stock = p.patch.in_stock.value; }
+        items[i]
+    };
+
     honk::delete<Deleted, ItemId>(c, "/{item_id}", "Delete an item") { p =>
         let user = current_user(c);
         let i = find_item(p.item_id);
@@ -118,8 +140,10 @@ fn app(c: honk::Ctx&) {
 }
 
 fn main() {
-    let a = ItemIn { name: "Goose feather", price: 2.5, size: Dimensions { 1.0, 10.0 }, .. };
-    let b = ItemIn { name: "Honk horn", description: "Very loud", price: 15.0, size: Dimensions { 4.0, 4.0 }, .. };
+    let a = ItemIn { name: "Goose feather", price: 2.5, category: honk::Enum<Category> { Category.Tool },
+                     size: Dimensions { 1.0, 10.0 }, .. };
+    let b = ItemIn { name: "Honk horn", description: "Very loud", price: 15.0,
+                     category: honk::Enum<Category> { Category.Toy }, size: Dimensions { 4.0, 4.0 }, .. };
     items.push(store(next_id, a)); next_id++;
     items.push(store(next_id, b)); next_id++;
     honk::serve(honk::Config { title: "Items API", description: "A CRUD API in Goose", .. }, app);

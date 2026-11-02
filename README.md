@@ -54,6 +54,7 @@ Then open **http://127.0.0.1:8000/docs**.
 |---|---|
 | Routes | `honk::get<R, P>(c, "/items/{item_id}") { p => ... }`, and `post`, `put`, `patch`, `delete` |
 | Typed params | A params struct `P`: path, query and body fields by name and type |
+| Optional values and enums | `honk::Opt<T>` (unset, `null` or a value) and `honk::Enum<E>` (a variant by name) |
 | Models | Plain Goose `struct`s, read by compile-time reflection |
 | Typed responses | The response type `R`, checked by the compiler and serialized to JSON |
 | Validation | A 422 listing every error with `type`, `loc`, `msg` and `input` |
@@ -62,6 +63,7 @@ Then open **http://127.0.0.1:8000/docs**.
 | Routers | `honk::include(c, "/users", "users", user_routes)`: a prefix and a docs tag |
 | Docs | `/docs` (Swagger UI), `/redoc` and `/openapi.json`, generated at startup |
 | Testing | `honk::request("GET", "/items/1", app)`, in-process with no sockets |
+| Keep-alive | Connections are reused between requests |
 | Status codes | `honk::post<R, P>(c, path, "summary", 201)` |
 | Other responses | `honk::Html`, `honk::Text`, `honk::Redirect`, `honk::NoContent` |
 
@@ -116,9 +118,9 @@ honk/                the package
   src/honk_net.c     BSD sockets (Winsock on Windows)
 examples/
   hello.goose        two routes
-  items.goose        CRUD: models, validation, errors, a router, a dependency, HTML
+  items.goose        CRUD: models, an enum, PATCH with Opt, errors, a router, a dependency, HTML
 tests/
-  test_honk.goose    33 checks through honk::request
+  test_honk.goose    46 checks through honk::request
 docs/
   quickstart.md      from nothing to /docs in five minutes
   guide.md           every feature, by example
@@ -150,18 +152,20 @@ goose tests/test_honk.goose
 
 Honk is version 0.1 and these are its limits:
 
-* **One request at a time.** The server is a single-threaded accept loop
-  with `Connection: close`. Goose threads share no memory and cannot take a
-  function value, so a worker pool is future work. Run several processes
-  behind a reverse proxy to use more cores.
+* **One request at a time.** The server is a single-threaded loop. It keeps
+  connections alive, but an idle one gives way as soon as another client
+  connects. Goose threads share no memory and cannot be generic, so a
+  worker pool is future work. Run several processes behind a reverse proxy
+  to use more cores.
 * **HTTP/1.1 only, without TLS.** Terminate TLS in a proxy such as nginx or
   Caddy.
-* **What a model field may be** is listed in [the guide](docs/guide.md#models).
-  Request models take scalars, strings (`const u8[:]` or `u8[..N]` for N in
-  8, 16, 32, 64, 128, 256) and nested models. Response models also take
-  arrays.
-* **Required fields** are the fields whose default is their type's zero.
-  Goose reflection cannot see whether a field declares a default (see
+* **What a model field may be** is listed in [the guide](docs/guide.md#6-models).
+  Request models take scalars, strings (`const u8[:]`, or `u8[..N]` for N
+  from 8 to 4096 in powers of two), `honk::Opt<T>`, `honk::Enum<E>`, one
+  list as the last field, and nested models.
+* **Required fields** are the fields whose default is their type's zero,
+  because Goose reflection cannot see whether a field declares a default.
+  Use `honk::Opt<T>` for an optional field whose default is zero (see
   [the guide](docs/guide.md#required-and-optional-fields)).
 * **No async.** Handlers run to completion, which Goose makes fast.
 

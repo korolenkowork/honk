@@ -76,7 +76,7 @@ fn route<R, P, F>(c: Ctx&, method: const u8[:], path: const u8[:], summary: cons
     if e.count > 0 {
         exception::throw(HTTPError { status: 422, detail: str("[", errors, "]"), is_json: true });
     }
-    let r: R = F(p);
+    let r: R = F(&p);              // by reference: P may hold a list
     respond(c, r);
 }
 
@@ -149,56 +149,103 @@ fn param_error(e: Errors&, kind: const u8[:], from: const u8[:], name: const u8[
     add_error(e, kind, loc, msg, input);
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: i64&, e: Errors&, k: i64) {
+// A scalar, string or enum field: its path or query parameter, parsed by
+// type.
+fn bind_field(c: Ctx&, name: const u8[:], dst: i64&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: i32&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: f64&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: bool&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: const u8[:]&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[>..]&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field<E>(c: Ctx&, name: const u8[:], dst: Enum<E>&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..8]&, e: Errors&, k: i64)    { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..16]&, e: Errors&, k: i64)   { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..32]&, e: Errors&, k: i64)   { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..64]&, e: Errors&, k: i64)   { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..128]&, e: Errors&, k: i64)  { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..256]&, e: Errors&, k: i64)  { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..512]&, e: Errors&, k: i64)  { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..1024]&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..2048]&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..4096]&, e: Errors&, k: i64) { bind_text(c, name, dst, e); }
+
+fn bind_text(c: Ctx&, name: const u8[:], dst, e: Errors&) {
     let s, found, from = param_text(c, name);
-    if !found { return; }
+    if found { parse_text(dst, s, e, from, name, BY_TYPE); }
+}
+
+// A list field: every query parameter of its name, as in ?tag=a&tag=b.
+fn bind_field<T>(c: Ctx&, name: const u8[:], dst: T[>..]&, e: Errors&, k: i64) {
+    each_query_value(c, name) { s =>
+        let el .= dst.push(default<T>());
+        parse_text(el, s, e, "query", name, BY_TYPE);
+    };
+}
+
+// An Opt field: filled, and set, only when its parameter or body was sent.
+fn bind_field<T>(c: Ctx&, name: const u8[:], dst: Opt<T>&, e: Errors&, k: i64) {
+    let sent = if is_model(dst.value, BY_TYPE) { trim(c.body).len > 0 && trim(c.body) != "null" }
+               else { has_param(c, name) };
+    if sent {
+        bind_field(c, name, dst.value, e, BY_TYPE);
+        dst.set = true;
+    }
+}
+
+// A model field is the request body.
+fn bind_field<T>(c: Ctx&, name: const u8[:], dst: T&, e: Errors&, k: f64) { read_body(c, dst, e); }
+
+fn has_param(c: Ctx&, name: const u8[:]) -> bool {
+    let s, found, from = param_text(c, name);
+    return found;
+}
+
+// Parses parameter text s into dst, by dst's type, or records why not.
+fn parse_text(dst: i64&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) {
     let v, ok = parse_int(s);
     if ok { dst = v; }
     else { param_error(e, "int_parsing", from, name, "Input should be a valid integer, unable to parse string as an integer", s); }
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: i32&, e: Errors&, k: i64) {
-    var wide: i64 = dst;
-    bind_field(c, name, wide, e, k);
-    if wide < -2147483648 || wide > 2147483647 {
-        let s, found, from = param_text(c, name);
-        param_error(e, "int_too_big", from, name, "Input should fit a 32-bit integer", s);
-        return;
-    }
-    dst = wide as i32;
+fn parse_text(dst: i32&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) {
+    let v, ok = parse_int(s);
+    if !ok { param_error(e, "int_parsing", from, name, "Input should be a valid integer, unable to parse string as an integer", s); }
+    else if v < -2147483648 || v > 2147483647 { param_error(e, "int_too_big", from, name, "Input should fit a 32-bit integer", s); }
+    else { dst = v as i32; }
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: f64&, e: Errors&, k: i64) {
-    let s, found, from = param_text(c, name);
-    if !found { return; }
+fn parse_text(dst: f64&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) {
     let v, ok = parse_flt(s);
     if ok { dst = v; }
     else { param_error(e, "float_parsing", from, name, "Input should be a valid number, unable to parse string as a number", s); }
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: bool&, e: Errors&, k: i64) {
-    let s, found, from = param_text(c, name);
-    if !found { return; }
+fn parse_text(dst: bool&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) {
     if s == "true" || s == "1" || s == "yes" || s == "on" || s.len == 0 { dst = true; }
     else if s == "false" || s == "0" || s == "no" || s == "off" { dst = false; }
     else { param_error(e, "bool_parsing", from, name, "Input should be a valid boolean, unable to interpret input", s); }
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: const u8[:]&, e: Errors&, k: i64) {
-    let s, found, from = param_text(c, name);
-    if found { dst = s; }
+fn parse_text(dst: const u8[:]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) { dst = s; }
+
+fn parse_text(dst: u8[>..]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) { dst.append(s); }
+
+fn parse_text<E>(dst: Enum<E>&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) {
+    if !enum_parse(s, dst.value) { param_error(e, "enum", from, name, enum_message(dst.value), s); }
 }
 
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..8]&, e: Errors&, k: i64)   { bind_limited(c, name, dst, 8, e); }
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..16]&, e: Errors&, k: i64)  { bind_limited(c, name, dst, 16, e); }
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..32]&, e: Errors&, k: i64)  { bind_limited(c, name, dst, 32, e); }
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..64]&, e: Errors&, k: i64)  { bind_limited(c, name, dst, 64, e); }
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..128]&, e: Errors&, k: i64) { bind_limited(c, name, dst, 128, e); }
-fn bind_field(c: Ctx&, name: const u8[:], dst: u8[..256]&, e: Errors&, k: i64) { bind_limited(c, name, dst, 256, e); }
+fn parse_text(dst: u8[..8]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)    { parse_limited(dst, 8, s, e, from, name); }
+fn parse_text(dst: u8[..16]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)   { parse_limited(dst, 16, s, e, from, name); }
+fn parse_text(dst: u8[..32]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)   { parse_limited(dst, 32, s, e, from, name); }
+fn parse_text(dst: u8[..64]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)   { parse_limited(dst, 64, s, e, from, name); }
+fn parse_text(dst: u8[..128]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)  { parse_limited(dst, 128, s, e, from, name); }
+fn parse_text(dst: u8[..256]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)  { parse_limited(dst, 256, s, e, from, name); }
+fn parse_text(dst: u8[..512]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64)  { parse_limited(dst, 512, s, e, from, name); }
+fn parse_text(dst: u8[..1024]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) { parse_limited(dst, 1024, s, e, from, name); }
+fn parse_text(dst: u8[..2048]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) { parse_limited(dst, 2048, s, e, from, name); }
+fn parse_text(dst: u8[..4096]&, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:], k: i64) { parse_limited(dst, 4096, s, e, from, name); }
 
-fn bind_limited<S>(c: Ctx&, name: const u8[:], dst: S&, max: i64, e: Errors&) {
-    let s, found, from = param_text(c, name);
-    if !found { return; }
+fn parse_limited<S>(dst: S&, max: i64, s: const u8[:], e: Errors&, from: const u8[:], name: const u8[:]) {
     if s.len > max {
         param_error(e, "string_too_long", from, name, str("String should have at most ", max, " characters"), s);
         return;
@@ -206,9 +253,6 @@ fn bind_limited<S>(c: Ctx&, name: const u8[:], dst: S&, max: i64, e: Errors&) {
     dst.clear();
     dst.append(s);
 }
-
-// A model field is the request body.
-fn bind_field<T>(c: Ctx&, name: const u8[:], dst: T&, e: Errors&, k: f64) { read_body(c, dst, e); }
 
 // ------------------------------------------------------------ responses
 

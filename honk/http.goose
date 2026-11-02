@@ -67,7 +67,9 @@ fn parse_request(c: Ctx&, raw: const u8[:]) -> bool, const u8[:] {
     // "/items/" and "/items" are the same route.
     if c.path.len > 1 && c.path[c.path.len - 1] == '/' { c.path = c.path[..c.path.len - 1]; }
     c.headers = if line_end + 2 < head_end { raw[line_end + 2..head_end] } else { raw[0..0] };
-    c.body = raw[head_end + 4..];
+    let len = content_length(raw[..head_end]);
+    let body_end = min(raw.len, head_end + 4 + max(len, 0));
+    c.body = raw[head_end + 4..body_end];
     return true, target;
 }
 
@@ -116,6 +118,34 @@ fn query_lookup(c: Ctx&, name: const u8[:]) -> const u8[:], bool {
     return value, found;
 }
 
+// Calls F(value) for each query parameter named name, percent-decoded.
+fn each_query_value<F>(c: Ctx&, name: const u8[:]) {
+    each_split(c.query, '&') { pair =>
+        let eq = find(pair, "=");
+        let key = if eq >= 0 { pair[..eq] } else { pair };
+        if pair.len > 0 && key == name {
+            let at = c.scratch.len;
+            if eq >= 0 { percent_decode(c.scratch, pair[eq + 1..], true); }
+            F(c.scratch[at..]);
+        }
+    };
+}
+
+// Whether the client asked to keep the connection: HTTP/1.1 does unless it
+// says `Connection: close`, HTTP/1.0 only with `Connection: keep-alive`. A
+// pipelined request already behind this one closes it instead, since only
+// one request is read at a time.
+fn wants_keep_alive(c: Ctx&, raw: const u8[:]) -> bool {
+    if find(raw, "\r\n\r\n") + 4 + c.body.len < raw.len { return false; }
+    let line = raw[..find(raw, "\r\n")];
+    let conn, sent = header(c, "connection");
+    var value: u8[..32] = [];
+    value.append(conn[..min(conn.len, 32)]);
+    to_lower(value);
+    if ends_with(line, "HTTP/1.0") { return sent && find(value, "keep-alive") >= 0; }
+    return !(sent && find(value, "close") >= 0);
+}
+
 fn same_text_nocase(a: u8[:], b: u8[:]) -> bool {
     if a.len != b.len { return false; }
     for i in a.len { if lower(a[i]) != lower(b[i]) { return false; } }
@@ -146,7 +176,8 @@ fn write_response(resp: u8[>..]&, c: Ctx&) {
     if !empty { format(resp, "content-type: ", c.content_type, "\r\n"); }
     let body = c.out[c.out_at..];
     format(resp, "content-length: ", if empty { 0 } else { body.len }, "\r\n");
-    resp.append("server: honk\r\nconnection: close\r\n");
+    resp.append(if c.keep_alive { "server: honk\r\nconnection: keep-alive\r\n" }
+                else { "server: honk\r\nconnection: close\r\n" });
     resp.append(c.resp_headers);
     resp.append("\r\n");
     if !empty { resp.append(body); }

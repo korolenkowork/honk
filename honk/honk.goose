@@ -44,6 +44,9 @@ struct Config {
     docs: bool = true,              // serve /docs, /redoc and /openapi.json
     log: bool = true,               // one line per request on stdout
     timeout_ms: i64 = 10000,        // how long a client may take to send its request
+    keep_alive: bool = true,        // serve several requests per connection
+    keep_alive_ms: i64 = 5000,      // how long an idle connection is kept
+    keep_alive_max: i64 = 100,      // requests per connection before it is closed
     max_body: i64 = 1048576,        // larger requests get 413
 }
 
@@ -75,6 +78,7 @@ struct Ctx {
     handled: bool = false,          // a route has answered
     path_seen: bool = false,        // a route matched the path but not the method
     describing: bool = false,       // routes record themselves instead of matching
+    keep_alive: bool = false,       // the connection stays open after this response
     prefix: u8[..128] = [],         // from honk::include
     tag: const u8[:] = "",          // from honk::include
     api: Api&,
@@ -160,18 +164,28 @@ fn serve<App>(cfg: Config) {
     loop {
         let conn = net_accept(fd, cfg.timeout_ms);
         if conn < 0 { continue; }
-        {
-            var raw: u8[>..] = [];
-            var resp: u8[>..] = [];
-            let got = read_request(conn, raw, cfg.max_body);
-            if got == READ_OK {
-                process(cfg, raw, spec, resp, App);
-            } else if got == READ_TOO_LARGE {
-                plain_response(resp, 413, "{\"detail\":\"Request Entity Too Large\"}");
-            } else if got == READ_BAD {
-                plain_response(resp, 400, "{\"detail\":\"Bad Request\"}");
+        var served = 0;
+        loop {
+            var keep = false;
+            {
+                var raw: u8[>..] = [];
+                var resp: u8[>..] = [];
+                let got = read_request(conn, raw, cfg.max_body);
+                if got == READ_OK {
+                    let status, again = process(cfg, raw, spec, resp, served + 1 < cfg.keep_alive_max, App);
+                    keep = again;
+                } else if got == READ_TOO_LARGE {
+                    plain_response(resp, 413, "{\"detail\":\"Request Entity Too Large\"}");
+                } else if got == READ_BAD {
+                    plain_response(resp, 400, "{\"detail\":\"Bad Request\"}");
+                }
+                if resp.len > 0 && !net_send(conn, resp) { keep = false; }
             }
-            if resp.len > 0 { net_send(conn, resp); }
+            served++;
+            if !keep || served >= cfg.keep_alive_max { break; }
+            // One request at a time: an idle connection gives way as soon as
+            // another client is waiting, rather than holding the server.
+            if net_wait(conn, fd, cfg.keep_alive_ms) != 1 { break; }
         }
         net_close(conn);
     }
@@ -193,7 +207,7 @@ fn request<App>(method: const u8[:], target: const u8[:], body: const u8[:] = ""
     raw.append("\r\n");
     raw.append(body);
     var resp: u8[>..] = [];
-    let status = process(cfg, raw, spec, resp, App);
+    let status, keep = process(cfg, raw, spec, resp, false, App);
     let at = find(resp, "\r\n\r\n");
     var body: u8[>..] = [];
     body.append(resp[at + 4..]);
@@ -201,8 +215,9 @@ fn request<App>(method: const u8[:], target: const u8[:], body: const u8[:] = ""
 }
 
 // Answers the request in raw with App: parses it, runs the routes and
-// writes the whole HTTP response into resp. Returns the status.
-fn process<App>(cfg: Config&, raw: const u8[:], spec: const u8[:], resp: u8[>..]&) -> i64 {
+// writes the whole HTTP response into resp. Returns the status, and whether
+// the connection stays open for another request, which may_keep allows.
+fn process<App>(cfg: Config&, raw: const u8[:], spec: const u8[:], resp: u8[>..]&, may_keep: bool) -> i64, bool {
     var out: u8[>..] = [];
     var extra: u8[>..] = [];
     var scratch: u8[>..] = [];
@@ -213,6 +228,7 @@ fn process<App>(cfg: Config&, raw: const u8[:], spec: const u8[:], resp: u8[>..]
                   out: out, resp_headers: extra, scratch: scratch, api: api };
     let started = clock();
     let parsed, target = parse_request(c, raw);
+    c.keep_alive = parsed && may_keep && cfg.keep_alive && wants_keep_alive(c, raw);
     if !parsed {
         c.status = 400;
         c.out.append("{\"detail\":\"Bad Request\"}");
@@ -254,5 +270,5 @@ fn process<App>(cfg: Config&, raw: const u8[:], spec: const u8[:], resp: u8[>..]
         line.append(" ms)");
         print(line);
     }
-    return c.status;
+    return c.status, c.keep_alive;
 }

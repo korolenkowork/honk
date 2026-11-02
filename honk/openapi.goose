@@ -115,6 +115,11 @@ fn describe_param(out: u8[>..]&, path: u8[:], name: const u8[:], v: i64, n: i64&
 fn describe_param(out: u8[>..]&, path: u8[:], name: const u8[:], v: f64, n: i64&, k: i64) { param_entry(out, path, name, v, n); }
 fn describe_param(out: u8[>..]&, path: u8[:], name: const u8[:], v: bool, n: i64&, k: i64) { param_entry(out, path, name, v, n); }
 fn describe_param<T>(out: u8[>..]&, path: u8[:], name: const u8[:], v: T[:], n: i64&, k: i64) { param_entry(out, path, name, v, n); }
+fn describe_param<T>(out: u8[>..]&, path: u8[:], name: const u8[:], v: T[>..]&, n: i64&, k: i64) { param_entry(out, path, name, v, n); }
+fn describe_param<E>(out: u8[>..]&, path: u8[:], name: const u8[:], v: Enum<E>&, n: i64&, k: i64) { param_entry(out, path, name, v, n); }
+fn describe_param<T>(out: u8[>..]&, path: u8[:], name: const u8[:], v: Opt<T>&, n: i64&, k: i64) {
+    if !is_model(v.value, BY_TYPE) { param_entry(out, path, name, v, n); }
+}
 fn describe_param<T>(out: u8[>..]&, path: u8[:], name: const u8[:], v: T&, n: i64&, k: f64) { }
 
 fn param_entry(out: u8[>..]&, path: u8[:], name: const u8[:], v, n: i64&) {
@@ -138,8 +143,16 @@ fn describe_body(out: u8[>..]&, v: i64, k: i64) { }
 fn describe_body(out: u8[>..]&, v: f64, k: i64) { }
 fn describe_body(out: u8[>..]&, v: bool, k: i64) { }
 fn describe_body<T>(out: u8[>..]&, v: T[:], k: i64) { }
-fn describe_body<T>(out: u8[>..]&, v: T&, k: f64) {
-    out.append(",\"requestBody\":{\"required\":true,\"content\":{\"application/json\":{\"schema\":");
+fn describe_body<T>(out: u8[>..]&, v: T[>..]&, k: i64) { }
+fn describe_body<E>(out: u8[>..]&, v: Enum<E>&, k: i64) { }
+fn describe_body<T>(out: u8[>..]&, v: Opt<T>&, k: i64) {
+    if is_model(v.value, BY_TYPE) { body_entry(out, v.value, false); }
+}
+fn describe_body<T>(out: u8[>..]&, v: T&, k: f64) { body_entry(out, v, true); }
+
+fn body_entry(out: u8[>..]&, v, required: bool) {
+    out.append(if required { ",\"requestBody\":{\"required\":true" } else { ",\"requestBody\":{\"required\":false" });
+    out.append(",\"content\":{\"application/json\":{\"schema\":");
     schema_of(out, v);
     out.append("}}}");
 }

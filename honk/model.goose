@@ -9,14 +9,18 @@
 //   bool                 JSON boolean
 //   const u8[:]          JSON string; a view into the request, no copy
 //   u8[..N]              JSON string of at most N bytes (N in CAPS, for reading)
-//   u8[], u8[>..]        JSON string (written only)
-//   T[k], T[>..], T[:]   JSON array of T (written only)
+//   u8[], u8[>..]        JSON string (u8[>..] read too, as the last field)
+//   T[>..]               JSON array of T; read too, as the last field
+//   T[k], T[:]           JSON array of T (written only)
+//   Opt<T>               T or null, never required
+//   Enum<E>              JSON string naming a variant of E
 //   another model        JSON object
 //
 // A body field is required unless it declares a default that is not its
 // type's zero: `price: f64` and `price: f64 = 0.0` are required,
 // `price: f64 = 9.99` is not. Goose cannot tell `= 0` from no default, so a
-// zero default reads as none. bool fields are never required.
+// zero default reads as none. bool, Opt and T[>..] fields are never
+// required; Enum and model fields always are.
 //
 // Overload resolution picks the writer for each field type. A model is any
 // type the scalar and array overloads do not take, which the trailing
@@ -31,6 +35,45 @@ import json;
 
 let BY_TYPE: i64 = 0;
 
+// The string capacities a request field may have: u8[..N] for each of these.
+let CAPS = [8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+
+// A field that may be left out or sent as null: `set` says whether it holds
+// a value. Its default is unset, or `honk::opt(v)` for a default value:
+//
+//     struct Patch { name: honk::Opt<u8[..32]>, tax: honk::Opt<f64> = honk::opt(0.2) }
+struct Opt<T> { set: bool = false, value: T }
+
+fn opt<T>(v: T) -> Opt<T> { Opt<T> { set: true, value: v } }
+
+// A field holding one variant of E, which must have no payloads, sent as the
+// variant's name: `color: honk::Enum<Color>` reads and writes "Red".
+struct Enum<E> { value: E }
+
+fn enum_name<E>(v: E) -> const u8[:] {
+    match v { const for <N, V> in variants<E> { V => N, } }
+}
+
+fn enum_parse<E>(s: u8[:], dst: E&) -> bool {
+    const for <N, V> in variants<E> { if s == N { dst = V; return true; } }
+    return false;
+}
+
+// "Input should be 'Red', 'Green' or 'Blue'", for a failed enum_parse.
+fn enum_message<E>(v: E) -> u8[>..] {
+    var out: u8[>..] = [];
+    out.append("Input should be ");
+    var n = 0;
+    const for <N, V> in variants<E> { n++; }
+    var i = 0;
+    const for <N, V> in variants<E> {
+        if i > 0 { out.append(if i == n - 1 { " or " } else { ", " }); }
+        format(out, "'", N, "'");
+        i++;
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------- writing
 
 // Appends v as JSON.
@@ -40,6 +83,10 @@ fn json_value(out: u8[>..]&, v: i64, k: i64) { json::format_int(out, v); }
 fn json_value(out: u8[>..]&, v: f64, k: i64) { json::format_number(out, v); }
 fn json_value(out: u8[>..]&, v: bool, k: i64) { json::format_bool(out, v); }
 fn json_value<T>(out: u8[>..]&, v: T[:], k: i64) { json_seq(out, v); }
+fn json_value<T>(out: u8[>..]&, v: Opt<T>&, k: i64) {
+    if v.set { json_value(out, v.value, BY_TYPE); } else { out.append("null"); }
+}
+fn json_value<E>(out: u8[>..]&, v: Enum<E>&, k: i64) { json::format_string(out, enum_name(v.value)); }
 fn json_value<T>(out: u8[>..]&, v: T&, k: f64) {
     out.push('{');
     var first = true;
@@ -76,13 +123,32 @@ fn schema_of(out: u8[>..]&, v) {
 fn schema_body(out: u8[>..]&, v: i64, k: i64) { out.append("\"type\":\"integer\""); }
 fn schema_body(out: u8[>..]&, v: f64, k: i64) { out.append("\"type\":\"number\""); }
 fn schema_body(out: u8[>..]&, v: bool, k: i64) { out.append("\"type\":\"boolean\""); }
-fn schema_body(out: u8[>..]&, v: u8[..8], k: i64)   { schema_str(out, 8); }
-fn schema_body(out: u8[>..]&, v: u8[..16], k: i64)  { schema_str(out, 16); }
-fn schema_body(out: u8[>..]&, v: u8[..32], k: i64)  { schema_str(out, 32); }
-fn schema_body(out: u8[>..]&, v: u8[..64], k: i64)  { schema_str(out, 64); }
-fn schema_body(out: u8[>..]&, v: u8[..128], k: i64) { schema_str(out, 128); }
-fn schema_body(out: u8[>..]&, v: u8[..256], k: i64) { schema_str(out, 256); }
+fn schema_body(out: u8[>..]&, v: u8[..8], k: i64)    { schema_str(out, 8); }
+fn schema_body(out: u8[>..]&, v: u8[..16], k: i64)   { schema_str(out, 16); }
+fn schema_body(out: u8[>..]&, v: u8[..32], k: i64)   { schema_str(out, 32); }
+fn schema_body(out: u8[>..]&, v: u8[..64], k: i64)   { schema_str(out, 64); }
+fn schema_body(out: u8[>..]&, v: u8[..128], k: i64)  { schema_str(out, 128); }
+fn schema_body(out: u8[>..]&, v: u8[..256], k: i64)  { schema_str(out, 256); }
+fn schema_body(out: u8[>..]&, v: u8[..512], k: i64)  { schema_str(out, 512); }
+fn schema_body(out: u8[>..]&, v: u8[..1024], k: i64) { schema_str(out, 1024); }
+fn schema_body(out: u8[>..]&, v: u8[..2048], k: i64) { schema_str(out, 2048); }
+fn schema_body(out: u8[>..]&, v: u8[..4096], k: i64) { schema_str(out, 4096); }
 fn schema_body<T>(out: u8[>..]&, v: T[:], k: i64) { schema_seq(out, v); }
+fn schema_body<T>(out: u8[>..]&, v: Opt<T>&, k: i64) {
+    out.append("\"anyOf\":[");
+    schema_of(out, v.value);
+    out.append(",{\"type\":\"null\"}]");
+}
+fn schema_body<E>(out: u8[>..]&, v: Enum<E>&, k: i64) {
+    out.append("\"type\":\"string\",\"enum\":[");
+    var first = true;
+    const for <N, V> in variants<E> {
+        if !first { out.push(','); }
+        first = false;
+        json::format_string(out, N);
+    }
+    out.push(']');
+}
 fn schema_body<T>(out: u8[>..]&, v: T&, k: f64) {
     var d = T { .. };
     out.append("\"type\":\"object\",\"properties\":{");
@@ -138,6 +204,9 @@ fn required_field(v: i64, k: i64) -> bool { v == 0 }
 fn required_field(v: f64, k: i64) -> bool { v == 0.0 }
 fn required_field(v: bool, k: i64) -> bool { false }
 fn required_field<T>(v: T[:], k: i64) -> bool { v.len == 0 }
+fn required_field<T>(v: T[>..]&, k: i64) -> bool { false }
+fn required_field<T>(v: Opt<T>&, k: i64) -> bool { false }
+fn required_field<E>(v: Enum<E>&, k: i64) -> bool { true }
 fn required_field<T>(v: T&, k: f64) -> bool { true }
 
 // ---------------------------------------------------------------- reading
@@ -255,12 +324,16 @@ fn read_value(r: json::Reader&, dst: const u8[:]&, e: Errors&, loc: u8[:], k: i6
     dst = e.scratch[at..];
 }
 
-fn read_value(r: json::Reader&, dst: u8[..8]&, e: Errors&, loc: u8[:], k: i64)   { read_limited(r, dst, 8, e, loc); }
-fn read_value(r: json::Reader&, dst: u8[..16]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 16, e, loc); }
-fn read_value(r: json::Reader&, dst: u8[..32]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 32, e, loc); }
-fn read_value(r: json::Reader&, dst: u8[..64]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 64, e, loc); }
-fn read_value(r: json::Reader&, dst: u8[..128]&, e: Errors&, loc: u8[:], k: i64) { read_limited(r, dst, 128, e, loc); }
-fn read_value(r: json::Reader&, dst: u8[..256]&, e: Errors&, loc: u8[:], k: i64) { read_limited(r, dst, 256, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..8]&, e: Errors&, loc: u8[:], k: i64)    { read_limited(r, dst, 8, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..16]&, e: Errors&, loc: u8[:], k: i64)   { read_limited(r, dst, 16, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..32]&, e: Errors&, loc: u8[:], k: i64)   { read_limited(r, dst, 32, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..64]&, e: Errors&, loc: u8[:], k: i64)   { read_limited(r, dst, 64, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..128]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 128, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..256]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 256, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..512]&, e: Errors&, loc: u8[:], k: i64)  { read_limited(r, dst, 512, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..1024]&, e: Errors&, loc: u8[:], k: i64) { read_limited(r, dst, 1024, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..2048]&, e: Errors&, loc: u8[:], k: i64) { read_limited(r, dst, 2048, e, loc); }
+fn read_value(r: json::Reader&, dst: u8[..4096]&, e: Errors&, loc: u8[:], k: i64) { read_limited(r, dst, 4096, e, loc); }
 
 fn read_limited<S>(r: json::Reader&, dst: S&, max: i64, e: Errors&, loc: u8[:]) {
     guard json::peek(r) == '"' else {
@@ -278,8 +351,49 @@ fn read_limited<S>(r: json::Reader&, dst: S&, max: i64, e: Errors&, loc: u8[:]) 
     dst.append(s);
 }
 
+// A string builder, as the last field of a model.
+fn read_value(r: json::Reader&, dst: u8[>..]&, e: Errors&, loc: u8[:], k: i64) {
+    guard json::peek(r) == '"' else {
+        add_error(e, "string_type", loc, "Input should be a valid string", skip_input(r));
+        return;
+    }
+    dst.append(json::read_string(r, e.scratch));
+}
+
+// A list, as the last field of a model: each element is read into a fresh
+// default<T>(), and its index joins the location of its errors.
+fn read_value<T>(r: json::Reader&, dst: T[>..]&, e: Errors&, loc: u8[:], k: i64) {
+    guard json::peek(r) == '[' else {
+        add_error(e, "list_type", loc, "Input should be a valid list", skip_input(r));
+        return;
+    }
+    json::each_element(r) {
+        var at: u8[>..] = [];
+        format(at, loc, ",", dst.len);
+        let el .= dst.push(default<T>());
+        read_value(r, el, e, at, BY_TYPE);
+    };
+}
+
+// null was handled by the caller, so a value is there.
+fn read_value<T>(r: json::Reader&, dst: Opt<T>&, e: Errors&, loc: u8[:], k: i64) {
+    read_value(r, dst.value, e, loc, BY_TYPE);
+    dst.set = true;
+}
+
+fn read_value<E>(r: json::Reader&, dst: Enum<E>&, e: Errors&, loc: u8[:], k: i64) {
+    guard json::peek(r) == '"' else {
+        add_error(e, "enum", loc, enum_message(dst.value), skip_input(r));
+        return;
+    }
+    let at = r.pos;
+    let s = json::read_string(r, e.scratch);
+    if !enum_parse(s, dst.value) { add_error(e, "enum", loc, enum_message(dst.value), trim(r.text[at..r.pos])); }
+}
+
 // A nested model: an object whose members are matched to the fields by
-// name. Unknown members are ignored and `null` leaves a field as it is.
+// name. Unknown members are ignored, and `null` unsets an Opt field and
+// leaves any other field as it is.
 fn read_value<T>(r: json::Reader&, dst: T&, e: Errors&, loc: u8[:], k: f64) {
     guard json::peek(r) == '{' else {
         add_error(e, "model_attributes_type", loc, "Input should be a valid dictionary or object", skip_input(r));
@@ -293,7 +407,7 @@ fn read_value<T>(r: json::Reader&, dst: T&, e: Errors&, loc: u8[:], k: f64) {
             if !matched && key == N {
                 matched = true;
                 seen[i] = true;
-                if json::peek(r) == 'n' { json::skip(r); }
+                if json::peek(r) == 'n' { json::skip(r); clear_opt(dst.A, BY_TYPE); }
                 else {
                     var at: u8[>..] = [];
                     format(at, loc, ",\"", N, "\"");
@@ -315,3 +429,18 @@ fn read_value<T>(r: json::Reader&, dst: T&, e: Errors&, loc: u8[:], k: f64) {
         i++;
     }
 }
+
+// An explicit null: unsets an Opt, and leaves anything else alone.
+fn clear_opt<T>(v: Opt<T>&, k: i64) { v.set = false; }
+fn clear_opt(v, k: f64) { }
+
+// Whether a field's type is a model, which a params struct reads from the
+// body rather than from a parameter.
+fn is_model(v: i64, k: i64) -> bool { false }
+fn is_model(v: f64, k: i64) -> bool { false }
+fn is_model(v: bool, k: i64) -> bool { false }
+fn is_model<T>(v: T[:], k: i64) -> bool { false }
+fn is_model<T>(v: T[>..]&, k: i64) -> bool { false }
+fn is_model<T>(v: Opt<T>&, k: i64) -> bool { is_model(v.value, BY_TYPE) }
+fn is_model<E>(v: Enum<E>&, k: i64) -> bool { false }
+fn is_model<T>(v: T&, k: f64) -> bool { true }

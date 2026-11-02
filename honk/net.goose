@@ -6,3 +6,4 @@ extern "honk_net_accept" fn net_accept(fd: i64, timeout_ms: i64) -> i64;
 extern "honk_net_recv" fn net_recv(fd: i64, out: u8[>..]&, max: i64) -> i64;
 extern "honk_net_send" fn net_send(fd: i64, data: const u8[:]) -> bool;
 extern "honk_net_close" fn net_close(fd: i64);
+extern "honk_net_wait" fn net_wait(conn: i64, listener: i64, timeout_ms: i64) -> i64;

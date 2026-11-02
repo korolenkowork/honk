@@ -151,6 +151,18 @@ true. A value that does not parse is answered with 422 at
 `["query", name]`. A query parameter that is never sent is not an error:
 the field keeps its default.
 
+A list field takes every value of a repeated parameter, and an `Opt` field
+records whether the parameter was sent at all (see
+[Optional values](#optional-values-honkopt)):
+
+```goose
+struct Search { size: honk::Opt<honk::Enum<Size>>, tag: const u8[:][>..] }
+// GET /search?tag=red&tag=blue&size=Large
+```
+
+A list must be the struct's last field, because Goose allows one growable
+array per struct, at its end.
+
 `honk::query_param(c, "name")` reads a query parameter directly.
 
 ## 5. Request bodies
@@ -172,10 +184,12 @@ honk::put<Item, UpdateItem>(c, "/items/{item_id}") { p =>
 The body is validated against the model before the block runs, and the
 errors' `loc` starts with `"body"`. A request with no body
 gets `{"type":"missing","loc":["body"]}`, and malformed JSON gets
-`json_invalid` with the byte offset. Unknown members are ignored, and a
-`null` member leaves its field at its default.
+`json_invalid` with the byte offset. Unknown members are ignored. A `null`
+member unsets an `Opt` field and leaves any other field at its default.
 
-Only one field should be a model. Bodies are limited to
+Only one field should be a model. To make the whole body optional, wrap it:
+`patch: honk::Opt<ItemPatch>` is unset when the request has no body (or a
+body of `null`), and the docs mark the body as not required. Bodies are limited to
 `Config.max_body` bytes (1 MiB by default), and a larger request is
 answered with 413.
 
@@ -191,10 +205,14 @@ registration, base type or generated code.
 | `f64`, `f32` | number | yes | yes |
 | `bool` | boolean | yes | yes |
 | `const u8[:]` | string | yes: a view into the request, nothing copied | yes |
-| `u8[..N]`, N = 8, 16, 32, 64, 128, 256 | string, `maxLength: N` | yes: longer input is a 422 | yes |
+| `u8[..N]`, N = 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096 | string, `maxLength: N` | yes: longer input is a 422 | yes |
 | `u8[..N]`, any other N | string | no | yes |
-| `u8[]`, `u8[>..]` | string | no | yes |
-| `T[k]`, `T[>..]`, `T[:]` | array of T | no | yes |
+| `u8[>..]` | string | yes, as the last field | yes |
+| `u8[]` | string | no | yes |
+| `T[>..]` | array of T | yes, as the last field | yes |
+| `T[k]`, `T[:]` | array of T | no | yes |
+| `honk::Opt<T>` | T or `null` | yes, never required | yes |
+| `honk::Enum<E>` | string naming a variant | yes | yes |
 | another model | object | yes | yes |
 
 The two string kinds are for different jobs. `u8[..32]` keeps its bytes
@@ -214,11 +232,68 @@ each field of `T { .. }` with its type's zero value:
   `= ""` would make it required.
 * `bool` fields are never required, because `false` is a reasonable
   default.
-* A nested model is required.
+* `honk::Opt<T>` and list (`T[>..]`) fields are never required.
+* `honk::Enum<E>` fields and nested models are required.
+
+When the zero rule gets a field wrong (it should be optional, but its
+default is zero or empty), make it a `honk::Opt`.
 
 The schema in `/openapi.json` follows the same rules, so the docs always
 match what the server enforces. This applies to bodies only. A query field
 is always optional and falls back to its default.
+
+### Optional values: `honk::Opt`
+
+```goose
+struct Opt<T> { set: bool = false, value: T }
+```
+
+An `Opt` field may be left out or sent as `null`, and `set` tells the
+handler which happened. That is what partial updates need:
+
+```goose
+struct ItemPatch { name: honk::Opt<u8[..32]>, price: honk::Opt<f64>, in_stock: honk::Opt<bool> }
+struct PatchItem { item_id: i64, patch: ItemPatch }
+
+honk::patch<Item, PatchItem>(c, "/items/{item_id}") { p =>
+    let i = find_item(p.item_id);
+    if p.patch.name.set { items[i].name = p.patch.name.value; }
+    if p.patch.price.set { items[i].price = p.patch.price.value; }
+    items[i]
+};
+```
+
+`honk::opt(v)` gives an `Opt` a default value: `tax: honk::Opt<f64> =
+honk::opt(0.2)` is 0.2 until the client sends another number, or `null`
+to unset it. In a response, an unset `Opt` is written as `null`, and its
+schema is `anyOf` the value's schema and `null`.
+
+### Enums: `honk::Enum`
+
+A Goose enum whose variants have no payloads can be a string field:
+
+```goose
+enum Category { Tool, Toy, Food }
+struct ItemIn { name: u8[..32], category: honk::Enum<Category> }
+```
+
+The field is sent and answered as the variant's name, `"Toy"`, and the
+docs list the names as the schema's `enum`. Anything else is a 422 with
+type `enum` and the message `Input should be 'Tool', 'Toy' or 'Food'`. The
+variant is `p.item.category.value`; `honk::enum_name(v)` gives its name.
+
+### Lists in requests
+
+A `T[>..]` field reads a JSON array, element by element, and an error in
+one element names its index: `["body","tags",1]`. Goose allows one
+growable array per struct, as its last field:
+
+```goose
+struct Order { size: honk::Enum<Size>, toppings: const u8[:][>..] }
+```
+
+A struct holding a list is not fixed-size, so it cannot be stored in an
+indexable array. Read what you need from it in the handler.
 
 ### Lists in responses
 
@@ -247,7 +322,7 @@ Every validation failure is collected, not just the first, and the request
 is answered once with all of them:
 
 ```bash
-curl -X POST localhost:8000/items -d '{"name":"Egg","price":"cheap","size":{"width":2}}'
+curl -X POST localhost:8000/items -d '{"name":"Egg","price":"cheap","category":"Food","size":{"width":2}}'
 ```
 
 ```json
@@ -259,8 +334,9 @@ curl -X POST localhost:8000/items -d '{"name":"Egg","price":"cheap","size":{"wid
 
 Each error's `type` is a stable, machine-readable name that clients can
 branch on: `missing`, `int_type`, `int_parsing`, `int_from_float`,
-`float_type`, `float_parsing`, `bool_type`, `bool_parsing`, `string_type`,
-`string_too_long`, `model_attributes_type`, `json_invalid`.
+`int_too_big`, `float_type`, `float_parsing`, `bool_type`, `bool_parsing`,
+`string_type`, `string_too_long`, `enum`, `list_type`,
+`model_attributes_type`, `json_invalid`.
 
 Rules that types cannot express, such as "price must be positive", belong
 in the handler:
@@ -456,6 +532,9 @@ honk::serve(honk::Config {
     log: true,              // INFO:     "GET /items/1 HTTP/1.1" 200 OK (0.02 ms)
     timeout_ms: 10000,      // a client that sends nothing for this long is dropped
     max_body: 1048576,
+    keep_alive: true,       // serve several requests per connection
+    keep_alive_ms: 5000,    // how long an idle connection is kept
+    keep_alive_max: 100,    // requests per connection before it is closed
 }, app);
 ```
 
@@ -466,9 +545,14 @@ it for TLS:
 goose build -O2 main.goose
 ```
 
-The server handles one connection at a time with `Connection: close`. To use
-several cores, run one process per core on different ports behind the
-proxy's load balancer.
+The server handles one request at a time. Connections are kept alive
+between requests (HTTP/1.1 by default, HTTP/1.0 when the client asks), but
+an idle connection gives way at once when another client connects, so a
+quiet client never holds the server. Pipelined requests are not supported:
+when a second request arrives before the first is answered, Honk answers
+the first and closes the connection, and the client sends the rest again.
+To use several cores, run one process per core on different ports behind
+the proxy's load balancer.
 
 ## 17. How Honk works
 
