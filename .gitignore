@@ -1,0 +1,16 @@
+# Local roadmap, kept out of the repository
+PLAN.md
+
+# Executables from `goose build`, written beside their sources
+examples/hello
+examples/items
+tests/test_honk
+*.exe
+*.pdb
+*.ilk
+
+# Editors and OS
+.DS_Store
+.vscode/
+.idea/
+*.swp

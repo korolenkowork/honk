@@ -1,0 +1,382 @@
+# Honk API reference
+
+Everything public in the `honk` namespace. Import the package from your root
+file with `import honk from "path/to/honk";`, and from your other files with
+`import honk;`. The [guide](guide.md) explains each feature with examples.
+
+<details>
+<summary>Contents</summary>
+
+- [Serving](#serving): `serve`, `Config`, `request`
+- [Routes](#routes): `get`, `post`, `put`, `patch`, `delete`, `include`
+- [The request context](#the-request-context): `Ctx`, `Param`
+- [Request helpers](#request-helpers): `header`, `path_param`, `query_param`
+- [Responses](#responses): `Html`, `Text`, `Redirect`, `NoContent`, `set_header`
+- [Errors](#errors): `raise`, `HTTPError`
+- [Models](#models): `to_json`, `schema_of`
+- [Types for params](#types-for-params): `NoParams`
+- [Constants](#constants)
+
+</details>
+
+---
+
+## Serving
+
+### `serve`
+
+```goose
+fn serve<App>(cfg: Config)
+```
+
+Describes `App` into the OpenAPI document, listens on `cfg.host:cfg.port`
+and answers requests until the process ends. `App` is a function
+`fn app(c: honk::Ctx&)` that declares the routes, passed after the config:
+
+```goose
+honk::serve(honk::Config { port: 8000, .. }, app);
+```
+
+Aborts with a message if it cannot listen. Requests are answered one at a
+time, each with `Connection: close`. A request whose head exceeds 64 KiB,
+or that is malformed, gets 400, and one whose body exceeds `cfg.max_body`
+gets 413.
+
+### `Config`
+
+```goose
+struct Config {
+    host: const u8[:] = "127.0.0.1",
+    port: i64 = 8000,
+    title: const u8[:] = "Honk API",        // OpenAPI info.title, and the docs pages' title
+    version: const u8[:] = "0.1.0",         // OpenAPI info.version
+    description: const u8[:] = "",         // OpenAPI info.description
+    docs: bool = true,                      // serve /docs, /redoc and /openapi.json
+    log: bool = true,                       // one line per request on stdout
+    timeout_ms: i64 = 10000,                // receive timeout per connection
+    max_body: i64 = 1048576,                // larger requests get 413
+}
+```
+
+`host` is an IPv4 address, `"0.0.0.0"` for every interface, or
+`"localhost"`.
+
+### `request`
+
+```goose
+fn request<App>(method: const u8[:], target: const u8[:], body: const u8[:] = "",
+                headers: const u8[:] = "") -> i64, u8[>..]
+```
+
+The test client. Answers one request with `App` in-process, with no
+sockets, and returns the status and the response body. `target` is the
+path with an optional query string. `headers` holds extra header lines,
+each ending in `\r\n`. A non-empty `body` is sent with
+`content-type: application/json`.
+
+```goose
+let status, body = honk::request("GET", "/items/1?verbose=true", app);
+let s, b = honk::request("POST", "/items", "{\"name\":\"Egg\"}", "x-token: abc\r\n", app);
+```
+
+The OpenAPI document is described for each call, so `/openapi.json` can be
+tested too.
+
+---
+
+## Routes
+
+### `get`, `post`, `put`, `patch`, `delete`
+
+```goose
+fn get<R, F>(c: Ctx&, path: const u8[:], summary: const u8[:] = "", status: i64 = 200)
+fn get<R, P, F>(c: Ctx&, path: const u8[:], summary: const u8[:] = "", status: i64 = 200)
+```
+
+`post`, `put`, `patch` and `delete` have the same two forms.
+
+Each declares a route of that method. `GET` routes also answer `HEAD`.
+
+| Parameter | Meaning |
+|---|---|
+| `R` | The response type: a [model](#models) (JSON) or a [response type](#responses). Given explicitly: `get<Item>`. |
+| `P` | The params struct, given explicitly: `get<Item, ReadItem>`. |
+| `F` | The handler: the trailing block. `{ ... }` in the first form, `{ p => ... }` in the second, where `p` is a `P`. Its value must be an `R`. |
+| `path` | The path template, relative to any [`include`](#include) prefix. `{name}` captures one segment, `{name:path}` the rest of the path. |
+| `summary` | The operation's summary in the docs. |
+| `status` | The success status code. The handler may override it through `c.status`. |
+
+**How a request is matched.** If an earlier route already answered, the
+declaration returns at once. Otherwise the path is matched against
+`prefix + path`, ignoring a trailing slash. When the path matches but the
+method does not, the request is remembered as a 405 candidate.
+
+**How `P` is filled.** It starts as `P { .. }`, so every field has its
+declared default. Then each field is filled by name and type:
+
+1. A field named by a `{name}` in the path takes that path segment.
+2. A field whose type is a struct (a model) takes the JSON body.
+3. Any other field takes the query parameter of its name, if sent.
+
+Scalar and string fields are parsed by type: `i64`, `i32`, `f64`, `bool`
+(`true/false/1/0/yes/no/on/off`; present with no value means true),
+`const u8[:]`, and `u8[..N]` for N in 8, 16, 32, 64, 128 and 256. Every
+failure is collected, and if there are any, the request is answered with
+422 and the block does not run. The error format is described under
+[Errors](#errors).
+
+**How the result is sent.** The block's value goes to the response writer
+for `R`: models as JSON, the response types as described below.
+
+### `include`
+
+```goose
+fn include<F>(c: Ctx&, prefix: const u8[:], tag: const u8[:] = "")
+```
+
+Runs the routes declared by `F`, a function `fn routes(c: honk::Ctx&)`,
+under a path prefix, and tags them for the docs:
+
+```goose
+honk::include(c, "/items", "items", item_routes);
+```
+
+Includes nest. The combined prefix is at most 128 bytes, and an inner tag
+replaces an outer one.
+
+---
+
+## The request context
+
+### `Ctx`
+
+```goose
+struct Ctx {
+    method: const u8[:],
+    path: const u8[:],              // percent-decoded, without a trailing slash
+    query: const u8[:],             // raw, without the '?'
+    headers: const u8[:],           // the raw header lines
+    body: const u8[:],
+    params: Param[..8],             // the matched route's path parameters
+    status: i64 = 200,
+    content_type: const u8[:] = "application/json",
+    out: u8[>..]&,                  // the response body, from out[out_at]
+    out_at: i64 = 0,
+    resp_headers: u8[>..]&,         // extra response header lines
+    scratch: u8[>..]&,              // decoded text that lives as long as the request
+    handled: bool = false,
+    path_seen: bool = false,
+    describing: bool = false,       // true during the startup describe pass
+    prefix: u8[..128] = [],
+    tag: const u8[:] = "",
+    api: Api&,
+}
+```
+
+The request in flight. Handlers mostly read it through the
+[helpers](#request-helpers), and may set `status` for a JSON response:
+
+```goose
+honk::post<Job, NewJob>(c, "/jobs") { p =>
+    c.status = 202;                                  // Accepted, instead of the route's 200
+    honk::set_header(c, "location", "/jobs/1");
+    Job { id: 1, state: "queued" }
+};
+```
+
+The response writer runs after the block, so the types that fix their own
+status or content type (`NoContent`, `Redirect`, `Html`, `Text`) set them
+after any change the block made.
+
+All slices in `Ctx` point into buffers owned by the server for one request.
+Copy what you keep (into a `u8[..N]` field, say) before the request ends.
+
+### `Param`
+
+```goose
+struct Param { name: u8[..32], value: const u8[:] }
+```
+
+One path parameter of the matched route.
+
+---
+
+## Request helpers
+
+### `header`
+
+```goose
+fn header(c: Ctx&, name: const u8[:]) -> const u8[:], bool
+```
+
+The value of a request header, matched case-insensitively and trimmed, and
+whether the header was present.
+
+### `path_param`
+
+```goose
+fn path_param(c: Ctx&, name: const u8[:]) -> const u8[:], bool
+```
+
+A path parameter captured by the matched route, as text.
+
+### `query_param`
+
+```goose
+fn query_param(c: Ctx&, name: const u8[:]) -> const u8[:], bool
+```
+
+The first query parameter of that name, percent-decoded with `+` as a
+space, and whether it was present.
+
+---
+
+## Responses
+
+Name one of these as `R` to answer with something other than JSON.
+
+### `Html`
+
+```goose
+struct Html { body: u8[] }
+```
+
+`text/html; charset=utf-8`. `honk::Html { body: str("<h1>", title, "</h1>") }`.
+
+### `Text`
+
+```goose
+struct Text { body: u8[] }
+```
+
+`text/plain; charset=utf-8`.
+
+### `Redirect`
+
+```goose
+struct Redirect { location: u8[], status: i64 = 307 }
+```
+
+Sets `location` and the status, with an empty body.
+
+### `NoContent`
+
+```goose
+struct NoContent { }
+```
+
+Status 204, with no body and no `content-type`.
+
+### `set_header`
+
+```goose
+fn set_header(c: Ctx&, name: const u8[:], value: const u8[:])
+```
+
+Adds a header line to the response. Every response also carries
+`content-type`, `content-length`, `server: honk` and `connection: close`.
+
+---
+
+## Errors
+
+### `raise`
+
+```goose
+fn raise<T>(status: i64, detail: T[:])
+```
+
+Stops the handler and answers `status` with `{"detail": detail}`. `detail`
+is any `u8` array or slice, a literal or a `str(...)`, and is copied:
+`honk::raise(404, str("Item ", id, " not found"))`. It never returns, so a
+value-returning function may end with it. Every call must be under a
+route block, which the compiler checks.
+
+### `HTTPError`
+
+```goose
+struct HTTPError { status: i64, detail: u8[], is_json: bool = false }
+```
+
+What `raise` throws, through Goose's `exception` module. With `is_json`,
+`detail` is sent as JSON rather than as a string. Validation uses this for
+its error list. Throwing one yourself with `exception::throw(HTTPError {
+... })` is the same as `raise`, plus control over `is_json`.
+
+### Validation errors
+
+```json
+{"detail":[{"type":"missing","loc":["body","size","height"],"msg":"Field required","input":null}]}
+```
+
+| Field | Meaning |
+|---|---|
+| `type` | A machine-readable error type, listed below |
+| `loc` | `"path"`, `"query"` or `"body"`, then the field names down to the value |
+| `msg` | A human-readable message |
+| `input` | The offending input as JSON, or `null` when it is missing |
+
+Types: `missing`, `int_type`, `int_parsing`, `int_from_float`,
+`int_too_big`, `float_type`, `float_parsing`, `bool_type`, `bool_parsing`,
+`string_type`, `string_too_long`, `model_attributes_type`, `json_invalid`.
+
+### Built-in statuses
+
+| Status | When |
+|---|---|
+| 400 | The request line or head is malformed |
+| 404 | No route matches the path: `{"detail":"Not Found"}` |
+| 405 | A route matches the path but not the method |
+| 413 | The body is larger than `Config.max_body` |
+| 422 | Params or body failed validation |
+
+---
+
+## Models
+
+A model is any struct. Its fields may be the types listed in the
+[guide](guide.md#6-models), and Honk reads them by reflection. A field is
+**required** in a request body when its value in `T { .. }` is its type's
+zero (`0`, `0.0`, empty). `bool` fields are never required, and nested
+models always are.
+
+### `to_json`
+
+```goose
+fn to_json(out: u8[>..]&, v)
+```
+
+Appends `v` as JSON. Numbers use the shortest form that reads back
+exactly, and strings are escaped. A model with fields `a`, `b` becomes
+`{"a":...,"b":...}` in declaration order.
+
+### `schema_of`
+
+```goose
+fn schema_of(out: u8[>..]&, v)
+```
+
+Appends the JSON Schema of `v`'s type, as `/openapi.json` uses it:
+`type`, `properties`, `required`, `default`, `maxLength`, `items` and
+`title`.
+
+---
+
+## Types for params
+
+### `NoParams`
+
+```goose
+struct NoParams { }
+```
+
+The params type of the one-type route form. The two-type form never needs
+it.
+
+---
+
+## Constants
+
+```goose
+let VERSION = "0.1.0";      // Honk's version, printed at startup
+```

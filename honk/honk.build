@@ -1,0 +1,3 @@
+// The native part of Honk: BSD sockets, in src/honk_net.c.
+c_sources = ["src/honk_net.c"];
+c_libs_windows = ["ws2_32"];
